@@ -67,13 +67,15 @@ def get_db_connection():
 def init_db():
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            # Таблица пользователей
+            # Удаляем старую таблицу (если нужно)
+            cursor.execute("DROP TABLE IF EXISTS users CASCADE")
+            
+            # Создаем новую таблицу с правильными столбцами
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
-                    first_name TEXT,
-                    last_name TEXT,
+                    full_name TEXT,  # Объединяем first_name и last_name в одно поле
                     is_admin BOOLEAN DEFAULT FALSE,
                     registered_at TIMESTAMP DEFAULT NOW()
                 )
@@ -142,17 +144,23 @@ def is_user_allowed(user_id: int) -> bool:
 
 # Регистрация пользователя
 def register_user(user_id: int, username: str, first_name: str, last_name: str):
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (user_id) DO UPDATE SET
-                    username = EXCLUDED.username,
-                    first_name = EXCLUDED.first_name,
-                    last_name = EXCLUDED.last_name
-            """, (user_id, username, first_name, last_name))
-            conn.commit()
+    try:
+        full_name = f"{first_name} {last_name}".strip()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO users (user_id, username, full_name)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        username = EXCLUDED.username,
+                        full_name = EXCLUDED.full_name
+                """, (user_id, username, full_name))
+                conn.commit()
+    except psycopg2.Error as e:
+        logger.error(f"Database error in register_user: {e}")
+        # Можно добавить автоматическое восстановление структуры БД
+        init_db()
+        register_user(user_id, username, first_name, last_name)  # Повторная попытка
 
 # Команда /start
 def start(update: Update, context: CallbackContext) -> None:
@@ -690,4 +698,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
