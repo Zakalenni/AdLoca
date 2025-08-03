@@ -70,18 +70,18 @@ def init_db():
             # Удаляем старую таблицу (если нужно)
             cursor.execute("DROP TABLE IF EXISTS users CASCADE")
             
-            # Создаем новую таблицу с правильными столбцами
+            # Создаем новую таблицу с правильными столбцами (без комментариев в SQL)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
-                    full_name TEXT,  # Объединяем first_name и last_name в одно поле
+                    full_name TEXT,
                     is_admin BOOLEAN DEFAULT FALSE,
                     registered_at TIMESTAMP DEFAULT NOW()
                 )
             """)
             
-            # Таблица задач
+            # Создаем остальные таблицы (также без комментариев в SQL)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id SERIAL PRIMARY KEY,
@@ -93,19 +93,17 @@ def init_db():
                 )
             """)
             
-            # Таблица распределения работ
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_assignments (
                     assignment_id SERIAL PRIMARY KEY,
                     task_id INTEGER REFERENCES tasks(task_id),
                     work_type TEXT NOT NULL,
-                    day_of_week INTEGER NOT NULL,  -- 0-6 (пн-вс)
+                    day_of_week INTEGER NOT NULL,
                     amount INTEGER NOT NULL,
                     assigned_at TIMESTAMP DEFAULT NOW()
                 )
             """)
             
-            # Таблица отчетов
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS reports (
                     report_id SERIAL PRIMARY KEY,
@@ -118,7 +116,6 @@ def init_db():
                 )
             """)
             
-            # Таблица разрешенных пользователей
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS allowed_users (
                     user_id BIGINT PRIMARY KEY
@@ -126,7 +123,6 @@ def init_db():
             """)
             
             conn.commit()
-
 # Проверка, является ли пользователь администратором
 def is_admin(user_id: int) -> bool:
     with get_db_connection() as conn:
@@ -698,5 +694,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
