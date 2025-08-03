@@ -39,28 +39,6 @@ WORK_TYPES = [
     "Фрезеровка пазов ручек", "Распил на ручки"
 ]
 
-def cancel(update: Update, context: CallbackContext) -> int:
-    """Отмена текущего действия и возврат в главное меню"""
-    try:
-        if update.message:
-            update.message.reply_text(
-                "Действие отменено",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            show_main_menu(update, context)
-        elif update.callback_query:
-            update.callback_query.answer()
-            update.callback_query.edit_message_text(
-                text="Действие отменено",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
-                )
-            )
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error in cancel function: {e}")
-        return ConversationHandler.END
-    
 # Подключение к PostgreSQL
 def get_db_connection():
     db_url = os.getenv('DATABASE_URL')
@@ -79,7 +57,6 @@ def get_db_connection():
 def init_db():
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
-            # Таблица пользователей
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -90,7 +67,6 @@ def init_db():
                 )
             """)
             
-            # Таблица задач
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id SERIAL PRIMARY KEY,
@@ -102,7 +78,6 @@ def init_db():
                 )
             """)
             
-            # Таблица распределения работ
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS task_assignments (
                     assignment_id SERIAL PRIMARY KEY,
@@ -114,12 +89,11 @@ def init_db():
                 )
             """)
             
-            # Таблица отчетов
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS reports (
                     report_id SERIAL PRIMARY KEY,
                     user_id BIGINT REFERENCES users(user_id),
-                    task_id INTEGER REFERENCES tasks(task_id),
+                    task_id INTEGER,
                     work_type TEXT NOT NULL,
                     amount INTEGER NOT NULL,
                     report_date DATE NOT NULL,
@@ -127,13 +101,11 @@ def init_db():
                 )
             """)
             
-            # Таблица разрешенных пользователей
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS allowed_users (
                     user_id BIGINT PRIMARY KEY
                 )
             """)
-            
             conn.commit()
 
 # Проверка прав администратора
@@ -196,11 +168,35 @@ def show_main_menu(update: Update, context: CallbackContext):
             text="Главное меню. Выберите действие:",
             reply_markup=reply_markup
         )
+        update.callback_query.answer()
     else:
         update.message.reply_text(
             "Главное меню. Выберите действие:",
             reply_markup=reply_markup
         )
+
+# Отмена действий
+def cancel(update: Update, context: CallbackContext) -> int:
+    """Отмена текущего действия и возврат в главное меню"""
+    try:
+        if update.message:
+            update.message.reply_text(
+                "Действие отменено",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        elif update.callback_query:
+            update.callback_query.answer()
+            update.callback_query.edit_message_text(
+                text="Действие отменено",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
+                )
+            )
+        show_main_menu(update, context)
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error in cancel function: {e}")
+        return ConversationHandler.END
 
 # Админ-панель
 def admin_panel(update: Update, context: CallbackContext) -> None:
@@ -325,9 +321,15 @@ def set_task(update: Update, context: CallbackContext) -> int:
 def set_task_description(update: Update, context: CallbackContext) -> int:
     text = update.message.text
     try:
+        if '-' not in text:
+            raise ValueError
+        
         description, amount = text.rsplit('-', 1)
         description = description.strip()
         amount = int(amount.strip())
+        
+        if amount <= 0:
+            raise ValueError
         
         context.user_data['task_description'] = description
         context.user_data['total_amount'] = amount
@@ -359,7 +361,7 @@ def set_task_description(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logger.error(f"Error setting task: {e}")
         update.message.reply_text(
-            "❌ Неверный формат. Введите в формате: 'Описание задачи - 100'",
+            "❌ Неверный формат. Введите в формате: 'Описание задачи - 100' (количество должно быть больше 0)",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
         return SETTING_TASK
@@ -406,6 +408,9 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
 def save_work_assignment(update: Update, context: CallbackContext) -> int:
     try:
         amount = int(update.message.text)
+        if amount <= 0:
+            raise ValueError
+        
         task_id = context.user_data['task_id']
         day_of_week = context.user_data['day_of_week']
         work_type = context.user_data['work_type']
@@ -426,10 +431,17 @@ def save_work_assignment(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
     except ValueError:
         update.message.reply_text(
-            "❌ Неверный формат количества. Введите целое число.",
+            "❌ Неверный формат количества. Введите целое число больше 0.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=f'day_{context.user_data["day_of_week"]}')]])
         )
         return SETTING_AMOUNT
+    except Exception as e:
+        logger.error(f"Error saving work assignment: {e}")
+        update.message.reply_text(
+            "❌ Ошибка при сохранении задания.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
+        )
+        return ConversationHandler.END
 
 # Просмотр задач
 def view_tasks(update: Update, context: CallbackContext) -> None:
@@ -491,11 +503,12 @@ def view_reports(update: Update, context: CallbackContext) -> None:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
-                    SELECT r.report_id, u.full_name, t.description, 
+                    SELECT r.report_id, u.full_name, 
+                           COALESCE(t.description, 'Без задачи') as task_description,
                            r.work_type, r.amount, r.report_date
                     FROM reports r
                     JOIN users u ON r.user_id = u.user_id
-                    JOIN tasks t ON r.task_id = t.task_id
+                    LEFT JOIN tasks t ON r.task_id = t.task_id
                     ORDER BY r.report_date DESC, r.reported_at DESC
                     LIMIT 20
                 """)
@@ -535,66 +548,30 @@ def send_report(update: Update, context: CallbackContext) -> int:
     query.answer()
     
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT task_id, description 
-                    FROM tasks 
-                    WHERE is_active = TRUE 
-                    ORDER BY created_at DESC
-                """)
-                tasks = cursor.fetchall()
-        
-        if not tasks:
-            query.edit_message_text(
-                text="ℹ️ Нет активных задач для отчета.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
-            )
-            return ConversationHandler.END
-        
+        # Создаем клавиатуру с выбором работы
         keyboard = []
-        for task in tasks:
-            keyboard.append([InlineKeyboardButton(task[1], callback_data=f'task_{task[0]}')])
+        for i in range(0, len(WORK_TYPES), 2):
+            row = []
+            if i < len(WORK_TYPES):
+                row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
+            if i+1 < len(WORK_TYPES):
+                row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
+            keyboard.append(row)
         
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='main_menu')])
         
         query.edit_message_text(
-            text="Выберите задачу для отчета:",
+            text="Выберите вид работы:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return REPORTING_WORK_TYPE
+        return REPORTING_AMOUNT
     except Exception as e:
         logger.error(f"Error starting report: {e}")
         query.edit_message_text(
-            text="❌ Ошибка при получении списка задач.",
+            text="❌ Ошибка при начале отчета.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
         )
         return ConversationHandler.END
-
-def report_work_type(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    task_id = int(query.data.split('_')[1])
-    context.user_data['report_task_id'] = task_id
-    
-    # Кнопки для выбора вида работы
-    keyboard = []
-    for i in range(0, len(WORK_TYPES), 2):
-        row = []
-        if i < len(WORK_TYPES):
-            row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
-        if i+1 < len(WORK_TYPES):
-            row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='send_report')])
-    
-    query.edit_message_text(
-        text="Выберите вид работы:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return REPORTING_AMOUNT
 
 def report_amount(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -606,14 +583,16 @@ def report_amount(update: Update, context: CallbackContext) -> int:
     
     query.edit_message_text(
         text=f"Введите количество выполненной работы '{work_type}':",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=f'task_{context.user_data["report_task_id"]}')]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
     )
     return REPORTING_ADDITIONAL
 
 def save_report(update: Update, context: CallbackContext) -> int:
     try:
         amount = int(update.message.text)
-        task_id = context.user_data['report_task_id']
+        if amount <= 0:
+            raise ValueError
+        
         work_type = context.user_data['report_work_type']
         user_id = update.message.from_user.id
         report_date = datetime.now().date()
@@ -621,13 +600,13 @@ def save_report(update: Update, context: CallbackContext) -> int:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO reports (user_id, task_id, work_type, amount, report_date) VALUES (%s, %s, %s, %s, %s)",
-                    (user_id, task_id, work_type, amount, report_date)
+                    "INSERT INTO reports (user_id, task_id, work_type, amount, report_date) VALUES (%s, NULL, %s, %s, %s)",
+                    (user_id, work_type, amount, report_date)
                 )
                 conn.commit()
         
         keyboard = [
-            [InlineKeyboardButton("➕ Добавить еще работу", callback_data=f'task_{task_id}')],
+            [InlineKeyboardButton("➕ Добавить еще работу", callback_data='send_report')],
             [InlineKeyboardButton("🔙 В главное меню", callback_data='main_menu')]
         ]
         
@@ -638,10 +617,17 @@ def save_report(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
     except ValueError:
         update.message.reply_text(
-            "❌ Неверный формат количества. Введите целое число.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data=f'task_{context.user_data["report_task_id"]}')]])
+            "❌ Неверный формат количества. Введите целое число больше 0.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
         )
         return REPORTING_AMOUNT
+    except Exception as e:
+        logger.error(f"Error saving report: {e}")
+        update.message.reply_text(
+            "❌ Ошибка при сохранении отчета.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В главное меню", callback_data='main_menu')]])
+        )
+        return ConversationHandler.END
 
 # Проверка разрешенного пользователя
 def is_user_allowed(user_id: int) -> bool:
@@ -675,6 +661,7 @@ def error_handler(update: Update, context: CallbackContext):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     
     if update.callback_query:
+        update.callback_query.answer()
         update.callback_query.edit_message_text(
             text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
@@ -741,7 +728,6 @@ def main() -> None:
     report_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(send_report, pattern='^send_report$')],
         states={
-            REPORTING_WORK_TYPE: [CallbackQueryHandler(report_work_type, pattern='^task_[0-9]+$')],
             REPORTING_AMOUNT: [CallbackQueryHandler(report_amount, pattern='^report_work_[0-9]+$')],
             REPORTING_ADDITIONAL: [MessageHandler(Filters.text & ~Filters.command, save_report)]
         },
@@ -766,4 +752,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
