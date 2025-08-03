@@ -1,7 +1,6 @@
 import os
 import logging
-import asyncio
-import socket
+import ssl
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -15,195 +14,247 @@ from typing import Dict, List, Optional
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log")
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Увеличим уровень логирования для дебага
-logging.getLogger("aiogram").setLevel(logging.WARNING)
-logging.getLogger("asyncpg").setLevel(logging.DEBUG)
-
 # Загружаем переменные окружения
 load_dotenv()
-
-# Проверка обязательных переменных
-REQUIRED_ENV_VARS = ['BOT_TOKEN', 'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE']
-for var in REQUIRED_ENV_VARS:
-    if not os.getenv(var):
-        logger.critical(f"Missing required environment variable: {var}")
-        raise ValueError(f"Missing required environment variable: {var}")
 
 # Инициализация бота
 bot = Bot(token=os.getenv('BOT_TOKEN'))
 dp = Dispatcher()
 
+# Состояния для FSM
+class AdminStates(StatesGroup):
+    WAITING_TASK_DESCRIPTION = State()
+    WAITING_WORK_TYPE = State()
+    WAITING_QUANTITY = State()
+    WAITING_USER_MANAGEMENT = State()
+
+class UserStates(StatesGroup):
+    WAITING_WORK_SELECTION = State()
+    WAITING_QUANTITY_DONE = State()
+
+# Типы работ
+WORK_TYPES = [
+    "Распил доски", "Фугование", "Рейсмусование", "Распил на детали",
+    "Отверстия в пласть", "Присадка отверстий", "Фрезеровка пазов",
+    "Фрезеровка углов", "Шлифовка", "Подрез", "Сборка", "Дошлифовка",
+    "Покраска каркасов", "Покраска ножек", "Покраска ручек",
+    "Рез на коробки", "Сборка коробок", "Упаковка", "Фрезеровка пазов ручек",
+    "Распил на ручки"
+]
+
+# Подключение к PostgreSQL с SSL
 async def create_db_connection():
-    max_retries = 10  # Увеличиваем количество попыток
-    retry_delay = 3   # Уменьшаем задержку между попытками
-    
-    for attempt in range(max_retries):
-        try:
-            host = os.getenv('PGHOST')
-            port = int(os.getenv('PGPORT'))
-            user = os.getenv('PGUSER')
-            password = os.getenv('PGPASSWORD')
-            database = os.getenv('PGDATABASE')
-            
-            # Преобразуем домен в IP
-            try:
-                host_ip = socket.gethostbyname(host)
-                logger.info(f"Resolved {host} to {host_ip}")
-            except socket.gaierror:
-                host_ip = host
-                logger.warning(f"Could not resolve hostname, using as-is: {host}")
-            
-            # Параметры подключения
-            conn = await asyncpg.connect(
-                host=host_ip,
-                port=port,
-                user=user,
-                password=password,
-                database=database,
-                ssl='require',
-                timeout=30,
-                command_timeout=30
-            )
-            
-            logger.info("Successfully connected to PostgreSQL")
-            return conn
-            
-        except Exception as e:
-            logger.warning(f"Connection attempt {attempt + 1} failed: {str(e)}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
 
-async def create_db_pool():
-    try:
-        pool = await asyncpg.create_pool(
-            host=os.getenv('PGHOST'),
-            port=int(os.getenv('PGPORT')),
-            user=os.getenv('PGUSER'),
-            password=os.getenv('PGPASSWORD'),
-            database=os.getenv('PGDATABASE'),
-            ssl='require',
-            min_size=1,
-            max_size=3,
-            timeout=30,
-            command_timeout=30
-        )
-        
-        # Проверка подключения
-        async with pool.acquire() as conn:
-            await conn.execute("SELECT 1")
-        
-        return pool
-    except Exception as e:
-        logger.error(f"Failed to create connection pool: {str(e)}")
-        # Fallback к одиночному подключению если пул не работает
-        logger.info("Trying single connection instead of pool")
-        conn = await create_db_connection()
-        return conn
+    return await asyncpg.connect(
+        host=os.getenv('DB_HOST'),
+        port=os.getenv('DB_PORT'),
+        user=os.getenv('DB_USER'),
+        password=os.getenv('DB_PASSWORD'),
+        database=os.getenv('DB_NAME'),
+        ssl=ssl_ctx
+    )
 
+# Инициализация базы данных
 async def init_db():
+    conn = await create_db_connection()
     try:
-        pool = await create_db_pool()
-        
-        if isinstance(pool, asyncpg.Connection):
-            # Если у нас одиночное подключение вместо пула
-            async with pool.transaction():
-                await create_tables(pool)
-            return pool
-        else:
-            # Если работает пул соединений
-            async with pool.acquire() as conn:
-                await create_tables(conn)
-            return pool
-            
-    except Exception as e:
-        logger.critical(f"Failed to initialize database: {str(e)}")
-        raise
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                is_admin BOOLEAN DEFAULT FALSE
+            )
+        ''')
 
-async def create_tables(conn):
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            full_name TEXT,
-            is_admin BOOLEAN DEFAULT FALSE,
-            is_active BOOLEAN DEFAULT TRUE,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS weekly_tasks (
+                task_id SERIAL PRIMARY KEY,
+                admin_id BIGINT,
+                description TEXT,
+                total_quantity INTEGER,
+                created_at TIMESTAMP DEFAULT NOW(),
+                week_number INTEGER,
+                year INTEGER
+            )
+        ''')
+
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS work_types (
+                work_type_id SERIAL PRIMARY KEY,
+                name TEXT UNIQUE
+            )
+        ''')
+
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS daily_reports (
+                report_id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                task_id INTEGER REFERENCES weekly_tasks(task_id),
+                work_type_id INTEGER REFERENCES work_types(work_type_id),
+                quantity_done INTEGER,
+                report_date DATE,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+
+        # Добавляем типы работ, если их нет
+        for work_type in WORK_TYPES:
+            await conn.execute('''
+                INSERT INTO work_types (name)
+                VALUES ($1)
+                ON CONFLICT (name) DO NOTHING
+            ''', work_type)
+
+    finally:
+        await conn.close()
+
+# --- Вспомогательные функции ---
+async def get_current_week() -> tuple:
+    today = datetime.now()
+    year, week_num, _ = today.isocalendar()
+    return week_num, year
+
+async def get_week_dates(week_num: int, year: int) -> str:
+    first_day = datetime.fromisocalendar(year, week_num, 1)
+    last_day = datetime.fromisocalendar(year, week_num, 7)
+    return f"{first_day.strftime('%d.%m')}-{last_day.strftime('%d.%m.%Y')}"
+
+async def delete_previous_message(message: types.Message):
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.error(f"Ошибка удаления сообщения: {e}")
+
+async def get_user_name(user_id: int) -> str:
+    conn = await create_db_connection()
+    try:
+        user = await conn.fetchrow('SELECT full_name FROM users WHERE user_id = $1', user_id)
+        return user['full_name'] if user else f"ID{user_id}"
+    finally:
+        await conn.close()
+
+# --- Клавиатуры ---
+def get_main_menu_kb(is_admin: bool = False):
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="📊 Отправить отчет"))
+    builder.add(types.KeyboardButton(text="📋 Мои отчеты"))
+    if is_admin:
+        builder.add(types.KeyboardButton(text="👨‍💻 Администрирование"))
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_admin_menu_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="📝 Поставить задачу"))
+    builder.add(types.KeyboardButton(text="📈 Сводный отчет"))
+    builder.add(types.KeyboardButton(text="👥 Управление пользователями"))
+    builder.add(types.KeyboardButton(text="🔙 Главное меню"))
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_work_types_kb():
+    builder = ReplyKeyboardBuilder()
+    for work_type in WORK_TYPES:
+        builder.add(types.KeyboardButton(text=work_type))
+    builder.add(types.KeyboardButton(text="🔙 Назад"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_back_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="🔙 Назад"))
+    return builder.as_markup(resize_keyboard=True)
+
+def get_user_management_kb():
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="Добавить пользователя",
+        callback_data="admin_add_user"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="Удалить пользователя",
+        callback_data="admin_remove_user"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="Назначить админа",
+        callback_data="admin_promote"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="🔙 Назад",
+        callback_data="admin_back"
+    ))
+    builder.adjust(1)
+    return builder.as_markup()
+
+# --- Обработчики команд ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    conn = await create_db_connection()
+    try:
+        # Проверяем, есть ли пользователь в базе
+        user = await conn.fetchrow(
+            'SELECT * FROM users WHERE user_id = $1', 
+            message.from_user.id
         )
-    ''')
-    # [Остальные CREATE TABLE...]
-
-async def on_startup(bot: Bot):
-    try:
-        logger.info("Starting bot initialization...")
         
-        me = await bot.get_me()
-        logger.info(f"Bot ready as @{me.username}")
+        if not user:
+            # Добавляем нового пользователя (неактивного по умолчанию)
+            await conn.execute(
+                '''
+                INSERT INTO users (user_id, username, full_name, is_active)
+                VALUES ($1, $2, $3, FALSE)
+                ''',
+                message.from_user.id,
+                message.from_user.username,
+                message.from_user.full_name
+            )
+            await message.answer(
+                "👋 Добро пожаловать! Ваш аккаунт отправлен на активацию администратору."
+            )
+            # Уведомляем администратора
+            admin_id = os.getenv('ADMIN_ID')
+            if admin_id:
+                await bot.send_message(
+                    admin_id,
+                    f"🆕 Новый пользователь:\n"
+                    f"ID: {message.from_user.id}\n"
+                    f"Имя: {message.from_user.full_name}\n"
+                    f"Username: @{message.from_user.username}\n\n"
+                    f"Используйте панель администрирования для активации."
+                )
+            return
         
-        # Инициализация БД с повторными попытками
-        max_db_attempts = 3
-        for attempt in range(max_db_attempts):
-            try:
-                pool = await init_db()
-                bot["pool"] = pool
-                logger.info("Database initialized successfully")
-                break
-            except Exception as e:
-                if attempt == max_db_attempts - 1:
-                    raise
-                logger.warning(f"DB init attempt {attempt + 1} failed, retrying...")
-                await asyncio.sleep(5)
+        if not user['is_active']:
+            await message.answer("⏳ Ваш аккаунт еще не активирован. Ожидайте подтверждения администратора.")
+            return
         
-        logger.info("Bot started successfully")
-    except Exception as e:
-        logger.critical(f"Startup failed: {str(e)}", exc_info=True)
-        raise
-
-async def on_shutdown(bot: Bot):
-    try:
-        logger.info("Shutting down...")
-        if "pool" in bot.data:
-            if isinstance(bot["pool"], asyncpg.pool.Pool):
-                await bot["pool"].close()
-            elif isinstance(bot["pool"], asyncpg.Connection):
-                await bot["pool"].close()
-            logger.info("Database connection closed")
-        await (await bot.get_session()).close()
-    except Exception as e:
-        logger.error(f"Shutdown error: {str(e)}")
+        is_admin = user['is_admin']
+        await message.answer(
+            "📋 <b>Главное меню</b>\n\n"
+            "Выберите действие:",
+            reply_markup=get_main_menu_kb(is_admin),
+            parse_mode="HTML"
+        )
     finally:
-        logger.info("Bot stopped")
+        await conn.close()
 
+# ... [остальные обработчики]
+
+# Запуск бота
 async def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    try:
-        logger.info("Starting polling...")
-        await dp.start_polling(bot, 
-                             handle_signals=False,
-                             close_bot_session=True)
-    except asyncio.CancelledError:
-        logger.info("Polling cancelled")
-    except Exception as e:
-        logger.critical(f"Polling error: {str(e)}", exc_info=True)
-    finally:
-        logger.info("Process finished")
+    await init_db()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Stopped by user")
-    except Exception as e:
-        logger.critical(f"Fatal error: {str(e)}", exc_info=True)
+    import asyncio
+    asyncio.run(main())
