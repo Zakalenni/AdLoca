@@ -1,6 +1,6 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time  # Добавлен time
 from typing import Dict, List
 
 import psycopg2
@@ -678,62 +678,11 @@ def main() -> None:
     # Обработчики команд
     dispatcher.add_handler(CommandHandler("start", start))
     
-    # Обработчики callback-запросов
-    dispatcher.add_handler(CallbackQueryHandler(main_menu, pattern='^main_menu$'))
-    dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
-    dispatcher.add_handler(CallbackQueryHandler(manage_users, pattern='^manage_users$'))
-    dispatcher.add_handler(CallbackQueryHandler(view_tasks, pattern='^view_tasks$'))
-    dispatcher.add_handler(CallbackQueryHandler(view_reports, pattern='^view_reports$'))
-    dispatcher.add_handler(CallbackQueryHandler(send_report, pattern='^send_report$'))
-    
-    # ConversationHandler для админских функций
-    admin_conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(set_task, pattern='^set_task$'),
-            CallbackQueryHandler(add_user, pattern='^add_user$'),
-            CallbackQueryHandler(remove_user, pattern='^remove_user$')
-        ],
-        states={
-            SETTING_TASK: [MessageHandler(Filters.text & ~Filters.command, set_task_description)],
-            SETTING_WORK_TYPE: [CallbackQueryHandler(set_work_type, pattern='^day_[0-6]$')],
-            SETTING_AMOUNT: [
-                CallbackQueryHandler(set_work_amount, pattern='^work_[0-9]+$'),
-                MessageHandler(Filters.text & ~Filters.command, save_work_assignment)
-            ],
-            ADMIN_ADD_USER: [MessageHandler(Filters.text & ~Filters.command, add_user_handler)],
-            ADMIN_REMOVE_USER: [MessageHandler(Filters.text & ~Filters.command, remove_user_handler)]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel),
-            CallbackQueryHandler(admin_panel, pattern='^admin_panel$'),
-            CallbackQueryHandler(manage_users, pattern='^manage_users$')
-        ],
-        allow_reentry=True
-    )
-    dispatcher.add_handler(admin_conv_handler)
-    
-    # ConversationHandler для отправки отчетов
-    report_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(send_report, pattern='^send_report$')],
-        states={
-            REPORTING_WORK_TYPE: [CallbackQueryHandler(report_work_type, pattern='^task_[0-9]+$')],
-            REPORTING_AMOUNT: [CallbackQueryHandler(report_amount, pattern='^report_work_[0-9]+$')],
-            REPORTING_ADDITIONAL: [MessageHandler(Filters.text & ~Filters.command, save_report)]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel),
-            CallbackQueryHandler(main_menu, pattern='^main_menu$')
-        ],
-        allow_reentry=True
-    )
-    dispatcher.add_handler(report_conv_handler)
-    
-    # Обработчик ошибок
-    dispatcher.add_error_handler(error_handler)
-    
+    # ... остальной код обработчиков ...
+
     # Планировщик для удаления старых сообщений (раз в день)
     job_queue = updater.job_queue
-    job_queue.run_daily(delete_old_messages, time=datetime.time(hour=3, minute=0))
+    job_queue.run_daily(delete_old_messages, time=time(hour=3, minute=0))  # Исправленная строка
     
     # Запуск бота
     updater.start_polling()
@@ -741,3 +690,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
