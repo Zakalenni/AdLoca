@@ -340,7 +340,7 @@ def set_task_description(update: Update, context: CallbackContext) -> int:
         logger.info(f"Task description saved: {description}")
         
         update.message.reply_text(
-            "Теперь введите общее количество для задачи (целое число):",
+            "Введите общее количество для задачи (целое число):",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
         return SETTING_TASK_AMOUNT
@@ -348,7 +348,7 @@ def set_task_description(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logger.error(f"Error in set_task_description: {e}")
         update.message.reply_text(
-            "❌ Ошибка. Попробуйте еще раз. Введите описание задачи:",
+            "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
         return SETTING_TASK_DESCRIPTION
@@ -824,15 +824,11 @@ def error_handler(update: Update, context: CallbackContext):
         )
 
 def unknown_message(update: Update, context: CallbackContext):
-    # Проверяем, находится ли пользователь в процессе создания задачи
-    if 'task_description' in context.user_data:
-        return set_task_description(update, context)
-    elif 'total_amount' in context.user_data:
-        return set_task_amount(update, context)
-    elif 'current_work_type' in context.user_data:
-        return set_work_amount(update, context)
+    # Проверяем, есть ли активный ConversationHandler
+    if context.user_data.get('in_conversation'):
+        # Если есть активный диалог, просто игнорируем сообщение
+        return
     
-    # Если не в процессе, показываем стандартное сообщение
     update.message.reply_text(
         "Я не понимаю эту команду. Используйте кнопки меню.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
@@ -868,44 +864,53 @@ def main() -> None:
     dispatcher.add_handler(CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$'))
     dispatcher.add_handler(CallbackQueryHandler(confirm_task, pattern='^confirm_task$'))
     
-    
     # ConversationHandler для админских функций
-    task_conv_handler = ConversationHandler(
+    admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
             SETTING_TASK_DESCRIPTION: [
                 MessageHandler(
-                    Filters.text & ~Filters.command & ~Filters.regex(r'^/'),
+                    Filters.text & ~Filters.command, 
                     set_task_description
                 )
             ],
             SETTING_TASK_AMOUNT: [
                 MessageHandler(
-                    Filters.text & ~Filters.command & ~Filters.regex(r'^/'),
+                    Filters.text & ~Filters.command,
                     set_task_amount
                 )
             ],
             ADDING_WORK_TYPES: [
-                CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'),
-                CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$')
+                CallbackQueryHandler(
+                    select_work_type, 
+                    pattern='^add_work_[0-9]+$'
+                ),
+                CallbackQueryHandler(
+                    finish_adding_works,
+                    pattern='^finish_adding_works$'
+                )
             ],
             SETTING_WORK_AMOUNT: [
                 MessageHandler(
-                    Filters.text & ~Filters.command & ~Filters.regex(r'^/'),
+                    Filters.text & ~Filters.command,
                     set_work_amount
                 )
             ],
             CONFIRM_TASK: [
-                CallbackQueryHandler(confirm_task, pattern='^confirm_task$')
+                CallbackQueryHandler(
+                    confirm_task,
+                    pattern='^confirm_task$'
+                )
             ]
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(admin_panel, pattern='^admin_panel$')
         ],
-        per_message=True
+        per_message=True,
+        allow_reentry=True
     )
-    dispatcher.add_handler(task_conv_handler)
+    dispatcher.add_handler(admin_conv_handler)
     
     # ConversationHandler для управления пользователями
     user_management_conv_handler = ConversationHandler(
@@ -940,11 +945,8 @@ def main() -> None:
     )
     dispatcher.add_handler(report_conv_handler)
     
-    # Обработчик неизвестных сообщений
-    dispatcher.add_handler(MessageHandler(
-    Filters.text & ~Filters.command & ~Filters.regex(r'^/'), 
-    unknown_message
-))
+    # Обработчик неизвестных сообщений (должен быть добавлен последним)
+    dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, unknown_message))
     
     # Обработчик ошибок
     dispatcher.add_error_handler(error_handler)
@@ -959,6 +961,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
-
-
