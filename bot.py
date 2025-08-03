@@ -79,7 +79,7 @@ async def create_db_pool():
             
             logger.info(f"Attempting DB connection (attempt {attempt + 1}/{max_retries})")
             
-            # Увеличиваем таймауты для Railway
+            # Исправленные параметры подключения
             pool = await asyncpg.create_pool(
                 host=host,
                 port=port,
@@ -89,9 +89,8 @@ async def create_db_pool():
                 ssl='require',
                 min_size=1,
                 max_size=5,
-                timeout=120,  # Увеличенный таймаут
-                command_timeout=120,
-                connection_timeout=60,
+                timeout=120,  # Общий таймаут
+                command_timeout=120,  # Таймаут выполнения команд
                 server_settings={
                     'application_name': 'production_bot',
                     'statement_timeout': '30000'  # 30 секунд на запрос
