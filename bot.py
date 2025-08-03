@@ -25,7 +25,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Константы для состояний ConversationHandler
-SETTING_TASK_DESCRIPTION, SETTING_TASK_AMOUNT = range(2)
 ADDING_WORK_TYPES, SETTING_WORK_AMOUNT, CONFIRM_TASK = range(3)
 REPORTING_WORK_TYPE, REPORTING_AMOUNT = range(2)
 ADMIN_ADD_USER, ADMIN_REMOVE_USER = range(2)
@@ -71,8 +70,6 @@ def init_db():
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id SERIAL PRIMARY KEY,
-                    description TEXT NOT NULL,
-                    total_amount INTEGER NOT NULL,
                     created_at TIMESTAMP DEFAULT NOW(),
                     created_by BIGINT REFERENCES users(user_id),
                     is_active BOOLEAN DEFAULT TRUE
@@ -318,65 +315,8 @@ def set_task(update: Update, context: CallbackContext) -> int:
     
     logger.info("Starting task creation process")
     
-    query.edit_message_text(
-        text="Введите описание задачи:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-    )
-    return SETTING_TASK_DESCRIPTION
-
-def set_task_description(update: Update, context: CallbackContext) -> int:
-    try:
-        description = update.message.text.strip()
-        logger.info(f"Received task description: {description}")
-        
-        if not description:
-            update.message.reply_text(
-                "❌ Описание не может быть пустым. Введите описание задачи:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-            )
-            return SETTING_TASK_DESCRIPTION
-        
-        context.user_data['task_description'] = description
-        logger.info(f"Task description saved: {description}")
-        
-        update.message.reply_text(
-            "Введите общее количество для задачи (целое число):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK_AMOUNT
-        
-    except Exception as e:
-        logger.error(f"Error in set_task_description: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK_DESCRIPTION
-
-def set_task_amount(update: Update, context: CallbackContext) -> int:
-    try:
-        total_amount = int(update.message.text.strip())
-        if total_amount <= 0:
-            raise ValueError
-            
-        context.user_data['total_amount'] = total_amount
-        logger.info(f"Task total amount saved: {total_amount}")
-        
-        # Переходим к добавлению работ
-        return add_work_type(update, context)
-    except ValueError:
-        update.message.reply_text(
-            "❌ Неверный формат количества. Введите целое положительное число:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in set_task_amount: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK_AMOUNT
+    # Сразу переходим к добавлению работ
+    return add_work_type(update, context)
 
 def add_work_type(update: Update, context: CallbackContext) -> int:
     # Создаем клавиатуру для выбора вида работы
@@ -471,8 +411,6 @@ def finish_adding_works(update: Update, context: CallbackContext) -> int:
     
     # Формируем сообщение с подтверждением
     message = "📝 Подтвердите создание задачи:\n\n"
-    message += f"🔹 Описание: {context.user_data['task_description']}\n"
-    message += f"🔹 Общее количество: {context.user_data['total_amount']}\n\n"
     message += "🔧 Добавленные работы:\n"
     
     for work in context.user_data['task_works']:
@@ -498,12 +436,10 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
         # Создаем задачу в базе данных
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                # Создаем основную задачу
+                # Создаем основную задачу (без описания)
                 cursor.execute(
-                    "INSERT INTO tasks (description, total_amount, created_by) VALUES (%s, %s, %s) RETURNING task_id",
-                    (context.user_data['task_description'], 
-                     context.user_data['total_amount'], 
-                     query.from_user.id)
+                    "INSERT INTO tasks (created_by) VALUES (%s) RETURNING task_id",
+                    (query.from_user.id,)
                 )
                 task_id = cursor.fetchone()[0]
                 logger.info(f"Created task with ID: {task_id}")
@@ -519,7 +455,7 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
                 conn.commit()
         
         query.edit_message_text(
-            text=f"✅ Задача '{context.user_data['task_description']}' успешно создана!",
+            text="✅ Задача успешно создана!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
         )
         
@@ -543,49 +479,47 @@ def view_tasks(update: Update, context: CallbackContext) -> None:
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                # Получаем список задач
+                # Получаем список задач с работами
                 cursor.execute("""
-                    SELECT t.task_id, t.description, t.total_amount, 
-                           COALESCE(SUM(r.amount), 0) AS completed
+                    SELECT t.task_id, t.created_at, u.full_name,
+                           tw.work_type, tw.amount
                     FROM tasks t
-                    LEFT JOIN reports r ON t.task_id = r.task_id
+                    JOIN task_works tw ON t.task_id = tw.task_id
+                    JOIN users u ON t.created_by = u.user_id
                     WHERE t.is_active = TRUE
-                    GROUP BY t.task_id
-                    ORDER BY t.created_at DESC
+                    ORDER BY t.created_at DESC, tw.created_at
                 """)
                 tasks = cursor.fetchall()
-                
-                # Для каждой задачи получаем список работ
-                tasks_with_works = []
-                for task in tasks:
-                    cursor.execute("""
-                        SELECT work_type, amount 
-                        FROM task_works 
-                        WHERE task_id = %s
-                        ORDER BY created_at
-                    """, (task[0],))
-                    works = cursor.fetchall()
-                    tasks_with_works.append((task, works))
         
-        if not tasks_with_works:
+        if not tasks:
             query.edit_message_text(
                 text="ℹ️ Нет активных задач.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
             )
             return
         
+        # Группируем работы по задачам
+        tasks_dict = {}
+        for task in tasks:
+            task_id = task[0]
+            if task_id not in tasks_dict:
+                tasks_dict[task_id] = {
+                    'created_at': task[1],
+                    'created_by': task[2],
+                    'works': []
+                }
+            tasks_dict[task_id]['works'].append((task[3], task[4]))
+        
         message = "📋 Список активных задач:\n\n"
-        for task, works in tasks_with_works:
-            progress = (task[3] / task[2]) * 100 if task[2] > 0 else 0
+        for task_id, task_data in tasks_dict.items():
             message += (
-                f"🔹 {task[1]}\n"
-                f"📌 Всего: {task[2]}\n"
-                f"✅ Выполнено: {task[3]}\n"
-                f"📊 Прогресс: {progress:.1f}%\n"
+                f"🔹 ID задачи: {task_id}\n"
+                f"📅 Дата создания: {task_data['created_at'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"👤 Создал: {task_data['created_by']}\n"
                 f"🔧 Работы:\n"
             )
             
-            for work in works:
+            for work in task_data['works']:
                 message += f"  - {work[0]}: {work[1]}\n"
             
             message += "\n"
@@ -615,7 +549,7 @@ def view_reports(update: Update, context: CallbackContext) -> None:
             with conn.cursor() as cursor:
                 cursor.execute("""
                     SELECT r.report_id, u.full_name, 
-                           COALESCE(t.description, 'Без задачи') as task_description,
+                           COALESCE(t.task_id::text, 'Без задачи') as task_id,
                            r.work_type, r.amount, r.report_date
                     FROM reports r
                     JOIN users u ON r.user_id = u.user_id
@@ -637,7 +571,7 @@ def view_reports(update: Update, context: CallbackContext) -> None:
             message += (
                 f"👤 {report[1]}\n"
                 f"📅 {report[5].strftime('%d.%m.%Y')}\n"
-                f"📌 Задача: {report[2]}\n"
+                f"📌 ID задачи: {report[2]}\n"
                 f"🔧 Работа: {report[3]}\n"
                 f"🔢 Количество: {report[4]}\n\n"
             )
@@ -696,14 +630,14 @@ def report_work_type(update: Update, context: CallbackContext) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT task_id, description FROM tasks WHERE is_active = TRUE ORDER BY created_at DESC
+                SELECT task_id FROM tasks WHERE is_active = TRUE ORDER BY created_at DESC
             """)
             tasks = cursor.fetchall()
     
     if tasks:
         keyboard = []
         for task in tasks:
-            keyboard.append([InlineKeyboardButton(task[1], callback_data=f'report_task_{task[0]}')])
+            keyboard.append([InlineKeyboardButton(f"Задача {task[0]}", callback_data=f'report_task_{task[0]}')])
         
         keyboard.append([InlineKeyboardButton("📌 Без задачи", callback_data='report_without_task')])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='send_report')])
@@ -824,11 +758,6 @@ def error_handler(update: Update, context: CallbackContext):
         )
 
 def unknown_message(update: Update, context: CallbackContext):
-    # Проверяем, есть ли активный ConversationHandler
-    if context.user_data.get('in_conversation'):
-        # Если есть активный диалог, просто игнорируем сообщение
-        return
-    
     update.message.reply_text(
         "Я не понимаю эту команду. Используйте кнопки меню.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
@@ -868,18 +797,6 @@ def main() -> None:
     admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
-            SETTING_TASK_DESCRIPTION: [
-                MessageHandler(
-                    Filters.text & ~Filters.command, 
-                    set_task_description
-                )
-            ],
-            SETTING_TASK_AMOUNT: [
-                MessageHandler(
-                    Filters.text & ~Filters.command,
-                    set_task_amount
-                )
-            ],
             ADDING_WORK_TYPES: [
                 CallbackQueryHandler(
                     select_work_type, 
@@ -945,8 +862,8 @@ def main() -> None:
     )
     dispatcher.add_handler(report_conv_handler)
     
-    # Обработчик неизвестных сообщений (должен быть добавлен последним)
-    dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, unknown_message))
+    # Обработчик неизвестных сообщений
+    dispatcher.add_handler(MessageHandler(Filters.all, unknown_message))
     
     # Обработчик ошибок
     dispatcher.add_error_handler(error_handler)
