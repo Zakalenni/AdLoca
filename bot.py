@@ -312,7 +312,11 @@ def set_task(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
-    context.user_data['task_works'] = []  # Инициализация списка работ
+    # Очищаем предыдущие данные
+    context.user_data.clear()
+    context.user_data['task_works'] = []
+    
+    logger.info("Starting task creation process")
     
     query.edit_message_text(
         text="Введите описание задачи:",
@@ -321,21 +325,33 @@ def set_task(update: Update, context: CallbackContext) -> int:
     return SETTING_TASK_DESCRIPTION
 
 def set_task_description(update: Update, context: CallbackContext) -> int:
-    description = update.message.text.strip()
-    if not description:
+    try:
+        description = update.message.text.strip()
+        logger.info(f"Received task description: {description}")
+        
+        if not description:
+            update.message.reply_text(
+                "❌ Описание не может быть пустым. Введите описание задачи:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+            )
+            return SETTING_TASK_DESCRIPTION
+        
+        context.user_data['task_description'] = description
+        logger.info(f"Task description saved: {description}")
+        
         update.message.reply_text(
-            "❌ Описание не может быть пустым. Введите описание задачи:",
+            "Введите общее количество для задачи (целое число):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
+        return SETTING_TASK_AMOUNT
+        
+    except Exception as e:
+        logger.error(f"Error in set_task_description: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
         return SETTING_TASK_DESCRIPTION
-    
-    context.user_data['task_description'] = description
-    
-    update.message.reply_text(
-        "Введите общее количество для задачи (целое число):",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-    )
-    return SETTING_TASK_AMOUNT
 
 def set_task_amount(update: Update, context: CallbackContext) -> int:
     try:
@@ -344,12 +360,20 @@ def set_task_amount(update: Update, context: CallbackContext) -> int:
             raise ValueError
             
         context.user_data['total_amount'] = total_amount
+        logger.info(f"Task total amount saved: {total_amount}")
         
         # Переходим к добавлению работ
         return add_work_type(update, context)
     except ValueError:
         update.message.reply_text(
             "❌ Неверный формат количества. Введите целое положительное число:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
+        return SETTING_TASK_AMOUNT
+    except Exception as e:
+        logger.error(f"Error in set_task_amount: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
         return SETTING_TASK_AMOUNT
@@ -393,6 +417,7 @@ def select_work_type(update: Update, context: CallbackContext) -> int:
     
     work_type_idx = int(query.data.split('_')[2])
     context.user_data['current_work_type'] = WORK_TYPES[work_type_idx]
+    logger.info(f"Selected work type: {WORK_TYPES[work_type_idx]}")
     
     query.edit_message_text(
         text=f"Введите количество для работы '{WORK_TYPES[work_type_idx]}':",
@@ -411,6 +436,7 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
             'work_type': work_type,
             'amount': amount
         })
+        logger.info(f"Added work: {work_type} - {amount}")
         
         update.message.reply_text(
             f"✅ Работа '{work_type}' в количестве {amount} добавлена к задаче.",
@@ -421,6 +447,13 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
     except ValueError:
         update.message.reply_text(
             "❌ Неверный формат количества. Введите целое положительное число:",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
+        )
+        return SETTING_WORK_AMOUNT
+    except Exception as e:
+        logger.error(f"Error in set_work_amount: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
         )
         return SETTING_WORK_AMOUNT
@@ -473,6 +506,7 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
                      query.from_user.id)
                 )
                 task_id = cursor.fetchone()[0]
+                logger.info(f"Created task with ID: {task_id}")
                 
                 # Добавляем все работы
                 for work in context.user_data['task_works']:
@@ -480,6 +514,7 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
                         "INSERT INTO task_works (task_id, work_type, amount) VALUES (%s, %s, %s)",
                         (task_id, work['work_type'], work['amount'])
                     )
+                    logger.info(f"Added work to task: {work['work_type']} - {work['amount']}")
                 
                 conn.commit()
         
@@ -489,10 +524,7 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
         )
         
         # Очищаем временные данные
-        context.user_data.pop('task_description', None)
-        context.user_data.pop('total_amount', None)
-        context.user_data.pop('task_works', None)
-        context.user_data.pop('current_work_type', None)
+        context.user_data.clear()
         
         return ConversationHandler.END
     except Exception as e:
@@ -791,6 +823,12 @@ def error_handler(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
         )
 
+def unknown_message(update: Update, context: CallbackContext):
+    update.message.reply_text(
+        "Я не понимаю эту команду. Используйте кнопки меню.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+    )
+
 def main() -> None:
     # Инициализация базы данных
     init_db()
@@ -817,25 +855,55 @@ def main() -> None:
     dispatcher.add_handler(CallbackQueryHandler(add_user, pattern='^add_user$'))
     dispatcher.add_handler(CallbackQueryHandler(remove_user, pattern='^remove_user$'))
     dispatcher.add_handler(CallbackQueryHandler(select_task_for_report, pattern='^report_task_|^report_without_task$'))
+    dispatcher.add_handler(CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'))
+    dispatcher.add_handler(CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$'))
+    dispatcher.add_handler(CallbackQueryHandler(confirm_task, pattern='^confirm_task$'))
     
     # ConversationHandler для админских функций
     admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
-            SETTING_TASK_DESCRIPTION: [MessageHandler(Filters.text & ~Filters.command, set_task_description)],
-            SETTING_TASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, set_task_amount)],
-            ADDING_WORK_TYPES: [
-                CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'),
-                CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$')
+            SETTING_TASK_DESCRIPTION: [
+                MessageHandler(
+                    Filters.text & ~Filters.command, 
+                    set_task_description
+                )
             ],
-            SETTING_WORK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, set_work_amount)],
-            CONFIRM_TASK: [CallbackQueryHandler(confirm_task, pattern='^confirm_task$')]
+            SETTING_TASK_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    set_task_amount
+                )
+            ],
+            ADDING_WORK_TYPES: [
+                CallbackQueryHandler(
+                    select_work_type, 
+                    pattern='^add_work_[0-9]+$'
+                ),
+                CallbackQueryHandler(
+                    finish_adding_works,
+                    pattern='^finish_adding_works$'
+                )
+            ],
+            SETTING_WORK_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    set_work_amount
+                )
+            ],
+            CONFIRM_TASK: [
+                CallbackQueryHandler(
+                    confirm_task,
+                    pattern='^confirm_task$'
+                )
+            ]
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(admin_panel, pattern='^admin_panel$')
         ],
-        per_message=True
+        per_message=True,
+        allow_reentry=True
     )
     dispatcher.add_handler(admin_conv_handler)
     
@@ -871,6 +939,9 @@ def main() -> None:
         per_message=True
     )
     dispatcher.add_handler(report_conv_handler)
+    
+    # Обработчик неизвестных сообщений
+    dispatcher.add_handler(MessageHandler(Filters.all, unknown_message))
     
     # Обработчик ошибок
     dispatcher.add_error_handler(error_handler)
