@@ -25,10 +25,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Константы для состояний ConversationHandler
-SETTING_TASK_NAME, SETTING_TASK_AMOUNT = range(2)
-ADDING_WORK_TYPES, SETTING_WORK_AMOUNT, CONFIRM_TASK = range(3)
-REPORTING_WORK_TYPE, REPORTING_AMOUNT = range(2)
-ADMIN_ADD_USER, ADMIN_REMOVE_USER = range(2)
+(
+    MAIN_MENU,
+    ADMIN_PANEL,
+    SET_TASK_DESCRIPTION,
+    SET_TASK_AMOUNT,
+    ADD_WORK_TYPE,
+    SET_WORK_AMOUNT,
+    CONFIRM_TASK,
+    REPORT_WORK_TYPE,
+    REPORT_AMOUNT,
+    MANAGE_USERS,
+    ADD_USER,
+    REMOVE_USER
+) = range(12)
 
 # Виды работ
 WORK_TYPES = [
@@ -40,73 +50,88 @@ WORK_TYPES = [
     "Фрезеровка пазов ручек", "Распил на ручки"
 ]
 
-# Подключение к PostgreSQL
+# Подключение к PostgreSQL с повторными попытками
 def get_db_connection():
-    db_url = os.getenv('DATABASE_URL')
-    if db_url:
-        return psycopg2.connect(db_url, sslmode='require')
-    return psycopg2.connect(
-        host=os.getenv('DB_HOST'),
-        port=os.getenv('DB_PORT'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        dbname=os.getenv('DB_NAME'),
-        sslmode='require'
-    )
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            db_url = os.getenv('DATABASE_URL')
+            if db_url:
+                return psycopg2.connect(db_url, sslmode='require')
+            
+            return psycopg2.connect(
+                host=os.getenv('DB_HOST'),
+                port=os.getenv('DB_PORT'),
+                user=os.getenv('DB_USER'),
+                password=os.getenv('DB_PASSWORD'),
+                dbname=os.getenv('DB_NAME'),
+                sslmode='require'
+            )
+        except psycopg2.OperationalError as e:
+            if attempt == max_retries - 1:
+                raise
+            logger.warning(f"Connection failed, retrying in {retry_delay} seconds... (Attempt {attempt + 1}/{max_retries})")
+            time.sleep(retry_delay)
 
 # Инициализация базы данных
 def init_db():
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    username TEXT,
-                    full_name TEXT,
-                    is_admin BOOLEAN DEFAULT FALSE,
-                    registered_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tasks (
-                    task_id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    total_amount INTEGER NOT NULL,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    created_by BIGINT REFERENCES users(user_id),
-                    is_active BOOLEAN DEFAULT TRUE
-                )
-            """)
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS task_works (
-                    work_id SERIAL PRIMARY KEY,
-                    task_id INTEGER REFERENCES tasks(task_id),
-                    work_type TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS reports (
-                    report_id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES users(user_id),
-                    task_id INTEGER,
-                    work_type TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    report_date DATE NOT NULL,
-                    reported_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS allowed_users (
-                    user_id BIGINT PRIMARY KEY
-                )
-            """)
-            conn.commit()
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        full_name TEXT,
+                        is_admin BOOLEAN DEFAULT FALSE,
+                        registered_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id SERIAL PRIMARY KEY,
+                        description TEXT NOT NULL,
+                        total_amount INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        created_by BIGINT REFERENCES users(user_id),
+                        is_active BOOLEAN DEFAULT TRUE
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS task_works (
+                        work_id SERIAL PRIMARY KEY,
+                        task_id INTEGER REFERENCES tasks(task_id),
+                        work_type TEXT NOT NULL,
+                        amount INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS reports (
+                        report_id SERIAL PRIMARY KEY,
+                        user_id BIGINT REFERENCES users(user_id),
+                        task_id INTEGER,
+                        work_type TEXT NOT NULL,
+                        amount INTEGER NOT NULL,
+                        report_date DATE NOT NULL,
+                        reported_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS allowed_users (
+                        user_id BIGINT PRIMARY KEY
+                    )
+                """)
+                conn.commit()
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        raise
 
 # Проверка прав администратора
 def is_admin(user_id: int) -> bool:
@@ -141,17 +166,17 @@ def register_user(user_id: int, username: str, first_name: str, last_name: str):
         logger.error(f"Error registering user: {e}")
 
 # Команда /start
-def start(update: Update, context: CallbackContext) -> None:
+def start(update: Update, context: CallbackContext) -> int:
     user = update.effective_user
     register_user(user.id, user.username, user.first_name, user.last_name)
     
     if not is_user_allowed(user.id):
         update.message.reply_text("⛔ Доступ запрещен. Обратитесь к администратору.")
-        return
+        return MAIN_MENU
     
-    show_main_menu(update, context)
+    return show_main_menu(update, context)
 
-def show_main_menu(update: Update, context: CallbackContext):
+def show_main_menu(update: Update, context: CallbackContext) -> int:
     user_id = update.effective_user.id
     keyboard = [
         [InlineKeyboardButton("📊 Отправить отчет", callback_data='send_report')],
@@ -174,6 +199,7 @@ def show_main_menu(update: Update, context: CallbackContext):
             "Главное меню. Выберите действие:",
             reply_markup=reply_markup
         )
+    return MAIN_MENU
 
 # Отмена действий
 def cancel(update: Update, context: CallbackContext) -> int:
@@ -192,20 +218,19 @@ def cancel(update: Update, context: CallbackContext) -> int:
                     [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
                 )
             )
-        show_main_menu(update, context)
-        return ConversationHandler.END
+        return show_main_menu(update, context)
     except Exception as e:
         logger.error(f"Error in cancel function: {e}")
-        return ConversationHandler.END
+        return MAIN_MENU
 
 # Админ-панель
-def admin_panel(update: Update, context: CallbackContext) -> None:
+def admin_panel(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
     if not is_admin(query.from_user.id):
         query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return
+        return MAIN_MENU
     
     keyboard = [
         [InlineKeyboardButton("📝 Поставить задачу", callback_data='set_task')],
@@ -218,15 +243,16 @@ def admin_panel(update: Update, context: CallbackContext) -> None:
         text="Админ-панель. Выберите действие:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    return ADMIN_PANEL
 
 # Управление пользователями
-def manage_users(update: Update, context: CallbackContext) -> None:
+def manage_users(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
     if not is_admin(query.from_user.id):
         query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return
+        return ADMIN_PANEL
     
     keyboard = [
         [InlineKeyboardButton("➕ Добавить пользователя", callback_data='add_user')],
@@ -238,6 +264,7 @@ def manage_users(update: Update, context: CallbackContext) -> None:
         text="Управление пользователями:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    return MANAGE_USERS
 
 # Добавление пользователя
 def add_user(update: Update, context: CallbackContext) -> int:
@@ -248,7 +275,7 @@ def add_user(update: Update, context: CallbackContext) -> int:
         text="Введите ID пользователя, которого хотите добавить:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
     )
-    return ADMIN_ADD_USER
+    return ADD_USER
 
 def add_user_handler(update: Update, context: CallbackContext) -> int:
     try:
@@ -265,13 +292,20 @@ def add_user_handler(update: Update, context: CallbackContext) -> int:
             f"✅ Пользователь {user_id} добавлен в список разрешенных.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
         )
-        return ConversationHandler.END
+        return MANAGE_USERS
     except ValueError:
         update.message.reply_text(
             "❌ Неверный формат ID. Введите числовой ID пользователя.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
         )
-        return ADMIN_ADD_USER
+        return ADD_USER
+    except Exception as e:
+        logger.error(f"Error adding user: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return ADD_USER
 
 # Удаление пользователя
 def remove_user(update: Update, context: CallbackContext) -> int:
@@ -282,7 +316,7 @@ def remove_user(update: Update, context: CallbackContext) -> int:
         text="Введите ID пользователя, которого хотите удалить:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
     )
-    return ADMIN_REMOVE_USER
+    return REMOVE_USER
 
 def remove_user_handler(update: Update, context: CallbackContext) -> int:
     try:
@@ -299,13 +333,20 @@ def remove_user_handler(update: Update, context: CallbackContext) -> int:
             f"✅ Пользователь {user_id} удален из списка разрешенных.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
         )
-        return ConversationHandler.END
+        return MANAGE_USERS
     except ValueError:
         update.message.reply_text(
             "❌ Неверный формат ID. Введите числовой ID пользователя.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
         )
-        return ADMIN_REMOVE_USER
+        return REMOVE_USER
+    except Exception as e:
+        logger.error(f"Error removing user: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return REMOVE_USER
 
 # Постановка задачи - начало
 def set_task(update: Update, context: CallbackContext) -> int:
@@ -322,36 +363,36 @@ def set_task(update: Update, context: CallbackContext) -> int:
         text="Введите название задачи:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
     )
-    return SETTING_TASK_NAME
+    return SET_TASK_DESCRIPTION
 
-def set_task_name(update: Update, context: CallbackContext) -> int:
+def set_task_description(update: Update, context: CallbackContext) -> int:
     try:
-        name = update.message.text.strip()
-        logger.info(f"Received task name: {name}")
+        description = update.message.text.strip()
+        logger.info(f"Received task description: {description}")
         
-        if not name:
+        if not description:
             update.message.reply_text(
                 "❌ Название не может быть пустым. Введите название задачи:",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
             )
-            return SETTING_TASK_NAME
+            return SET_TASK_DESCRIPTION
         
-        context.user_data['task_name'] = name
-        logger.info(f"Task name saved: {name}")
+        context.user_data['task_description'] = description
+        logger.info(f"Task description saved: {description}")
         
         update.message.reply_text(
             "Введите общее количество для задачи (целое число):",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
-        return SETTING_TASK_AMOUNT
+        return SET_TASK_AMOUNT
         
     except Exception as e:
-        logger.error(f"Error in set_task_name: {e}")
+        logger.error(f"Error in set_task_description: {e}")
         update.message.reply_text(
             "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
-        return SETTING_TASK_NAME
+        return SET_TASK_DESCRIPTION
 
 def set_task_amount(update: Update, context: CallbackContext) -> int:
     try:
@@ -369,14 +410,14 @@ def set_task_amount(update: Update, context: CallbackContext) -> int:
             "❌ Неверный формат количества. Введите целое положительное число:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
-        return SETTING_TASK_AMOUNT
+        return SET_TASK_AMOUNT
     except Exception as e:
         logger.error(f"Error in set_task_amount: {e}")
         update.message.reply_text(
             "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
-        return SETTING_TASK_AMOUNT
+        return SET_TASK_AMOUNT
 
 def add_work_type(update: Update, context: CallbackContext) -> int:
     # Создаем клавиатуру для выбора вида работы
@@ -409,7 +450,7 @@ def add_work_type(update: Update, context: CallbackContext) -> int:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
-    return ADDING_WORK_TYPES
+    return ADD_WORK_TYPE
 
 def select_work_type(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -423,7 +464,7 @@ def select_work_type(update: Update, context: CallbackContext) -> int:
         text=f"Введите количество для работы '{WORK_TYPES[work_type_idx]}':",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
     )
-    return SETTING_WORK_AMOUNT
+    return SET_WORK_AMOUNT
 
 def set_work_amount(update: Update, context: CallbackContext) -> int:
     try:
@@ -449,14 +490,14 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
             "❌ Неверный формат количества. Введите целое положительное число:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
         )
-        return SETTING_WORK_AMOUNT
+        return SET_WORK_AMOUNT
     except Exception as e:
         logger.error(f"Error in set_work_amount: {e}")
         update.message.reply_text(
             "❌ Произошла ошибка. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
         )
-        return SETTING_WORK_AMOUNT
+        return SET_WORK_AMOUNT
 
 def finish_adding_works(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -467,11 +508,11 @@ def finish_adding_works(update: Update, context: CallbackContext) -> int:
             text="❌ Не добавлено ни одной работы. Добавьте хотя бы одну работу.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
         )
-        return ADDING_WORK_TYPES
+        return ADD_WORK_TYPE
     
     # Формируем сообщение с подтверждением
     message = "📝 Подтвердите создание задачи:\n\n"
-    message += f"🔹 Название: {context.user_data['task_name']}\n"
+    message += f"🔹 Название: {context.user_data['task_description']}\n"
     message += f"🔹 Общее количество: {context.user_data['total_amount']}\n\n"
     message += "🔧 Добавленные работы:\n"
     
@@ -500,8 +541,8 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
             with conn.cursor() as cursor:
                 # Создаем основную задачу
                 cursor.execute(
-                    "INSERT INTO tasks (name, total_amount, created_by) VALUES (%s, %s, %s) RETURNING task_id",
-                    (context.user_data['task_name'], 
+                    "INSERT INTO tasks (description, total_amount, created_by) VALUES (%s, %s, %s) RETURNING task_id",
+                    (context.user_data['task_description'], 
                      context.user_data['total_amount'], 
                      query.from_user.id)
                 )
@@ -519,24 +560,24 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
                 conn.commit()
         
         query.edit_message_text(
-            text=f"✅ Задача '{context.user_data['task_name']}' успешно создана!",
+            text=f"✅ Задача '{context.user_data['task_description']}' успешно создана!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
         )
         
         # Очищаем временные данные
         context.user_data.clear()
         
-        return ConversationHandler.END
+        return ADMIN_PANEL
     except Exception as e:
         logger.error(f"Error creating task: {e}")
         query.edit_message_text(
             text="❌ Ошибка при создании задачи. Попробуйте еще раз.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
         )
-        return ConversationHandler.END
+        return ADMIN_PANEL
 
 # Просмотр задач
-def view_tasks(update: Update, context: CallbackContext) -> None:
+def view_tasks(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
@@ -545,7 +586,7 @@ def view_tasks(update: Update, context: CallbackContext) -> None:
             with conn.cursor() as cursor:
                 # Получаем список задач
                 cursor.execute("""
-                    SELECT t.task_id, t.name, t.total_amount, 
+                    SELECT t.task_id, t.description, t.total_amount, 
                            COALESCE(SUM(r.amount), 0) AS completed
                     FROM tasks t
                     LEFT JOIN reports r ON t.task_id = r.task_id
@@ -572,7 +613,7 @@ def view_tasks(update: Update, context: CallbackContext) -> None:
                 text="ℹ️ Нет активных задач.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
             )
-            return
+            return MAIN_MENU
         
         message = "📋 Список активных задач:\n\n"
         for task, works in tasks_with_works:
@@ -594,28 +635,30 @@ def view_tasks(update: Update, context: CallbackContext) -> None:
             text=message,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
         )
+        return MAIN_MENU
     except Exception as e:
         logger.error(f"Error viewing tasks: {e}")
         query.edit_message_text(
             text="❌ Ошибка при получении списка задач.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
         )
+        return MAIN_MENU
 
 # Просмотр отчетов
-def view_reports(update: Update, context: CallbackContext) -> None:
+def view_reports(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
     if not is_admin(query.from_user.id):
         query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return
+        return MAIN_MENU
     
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 cursor.execute("""
                     SELECT r.report_id, u.full_name, 
-                           COALESCE(t.name, 'Без задачи') as task_name,
+                           COALESCE(t.description, 'Без задачи') as task_description,
                            r.work_type, r.amount, r.report_date
                     FROM reports r
                     JOIN users u ON r.user_id = u.user_id
@@ -630,7 +673,7 @@ def view_reports(update: Update, context: CallbackContext) -> None:
                 text="ℹ️ Нет отчетов для отображения.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
             )
-            return
+            return ADMIN_PANEL
         
         message = "📊 Последние отчеты:\n\n"
         for report in reports:
@@ -646,12 +689,14 @@ def view_reports(update: Update, context: CallbackContext) -> None:
             text=message,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
+        return ADMIN_PANEL
     except Exception as e:
         logger.error(f"Error viewing reports: {e}")
         query.edit_message_text(
             text="❌ Ошибка при получении отчетов.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
         )
+        return ADMIN_PANEL
 
 # Отправка отчета
 def send_report(update: Update, context: CallbackContext) -> int:
@@ -675,14 +720,14 @@ def send_report(update: Update, context: CallbackContext) -> int:
             text="Выберите вид работы:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return REPORTING_WORK_TYPE
+        return REPORT_WORK_TYPE
     except Exception as e:
         logger.error(f"Error starting report: {e}")
         query.edit_message_text(
             text="❌ Ошибка при начале отчета.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
         )
-        return ConversationHandler.END
+        return MAIN_MENU
 
 def report_work_type(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -696,7 +741,7 @@ def report_work_type(update: Update, context: CallbackContext) -> int:
     with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT task_id, name FROM tasks WHERE is_active = TRUE ORDER BY created_at DESC
+                SELECT task_id, description FROM tasks WHERE is_active = TRUE ORDER BY created_at DESC
             """)
             tasks = cursor.fetchall()
     
@@ -718,7 +763,7 @@ def report_work_type(update: Update, context: CallbackContext) -> int:
             text=f"Введите количество выполненной работы '{work_type}':",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
         )
-        return REPORTING_AMOUNT
+        return REPORT_AMOUNT
 
 def select_task_for_report(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -734,7 +779,7 @@ def select_task_for_report(update: Update, context: CallbackContext) -> int:
         text=f"Введите количество выполненной работы '{context.user_data['report_work_type']}':",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
     )
-    return REPORTING_AMOUNT
+    return REPORT_AMOUNT
 
 def save_report(update: Update, context: CallbackContext) -> int:
     try:
@@ -765,20 +810,20 @@ def save_report(update: Update, context: CallbackContext) -> int:
             f"✅ Отчет по работе '{work_type}'{task_info} в количестве {amount} успешно сохранен!",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return ConversationHandler.END
+        return MAIN_MENU
     except ValueError:
         update.message.reply_text(
             "❌ Неверный формат количества. Введите целое число больше 0.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
         )
-        return REPORTING_AMOUNT
+        return REPORT_AMOUNT
     except Exception as e:
         logger.error(f"Error saving report: {e}")
         update.message.reply_text(
             "❌ Ошибка при сохранении отчета.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В главное меню", callback_data='main_menu')]])
         )
-        return ConversationHandler.END
+        return MAIN_MENU
 
 # Проверка разрешенного пользователя
 def is_user_allowed(user_id: int) -> bool:
@@ -815,70 +860,82 @@ def error_handler(update: Update, context: CallbackContext):
         update.callback_query.answer()
         update.callback_query.edit_message_text(
             text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
         )
     else:
         update.message.reply_text(
             "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
         )
+    return MAIN_MENU
 
 def unknown_message(update: Update, context: CallbackContext):
-    # Перенаправляем в главное меню, если сообщение не распознано
-    show_main_menu(update, context)
+    update.message.reply_text(
+        "Я не понимаю эту команду. Используйте кнопки меню.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+    )
+    return MAIN_MENU
 
 def main() -> None:
     # Инициализация базы данных
-    init_db()
-    
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации БД: {e}")
+        return
+
     # Создание Updater
     token = os.getenv('TELEGRAM_TOKEN')
+    if not token:
+        logger.error("Не задан TELEGRAM_TOKEN")
+        return
+        
     updater = Updater(token, use_context=True)
-    
-    # Получаем диспетчер
     dispatcher = updater.dispatcher
-    
+
+    # Определение состояний ConversationHandler
+    (
+        SETTING_TASK_DESCRIPTION, SETTING_TASK_AMOUNT,
+        ADDING_WORK_TYPES, SETTING_WORK_AMOUNT, CONFIRM_TASK,
+        REPORTING_WORK_TYPE, REPORTING_AMOUNT,
+        ADMIN_ADD_USER, ADMIN_REMOVE_USER
+    ) = range(9)
+
     # Обработчики команд
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("cancel", cancel))
-    
-    # Обработчики callback-запросов
+
+    # Основные обработчики callback-запросов
     dispatcher.add_handler(CallbackQueryHandler(show_main_menu, pattern='^main_menu$'))
     dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     dispatcher.add_handler(CallbackQueryHandler(manage_users, pattern='^manage_users$'))
     dispatcher.add_handler(CallbackQueryHandler(view_tasks, pattern='^view_tasks$'))
     dispatcher.add_handler(CallbackQueryHandler(view_reports, pattern='^view_reports$'))
     dispatcher.add_handler(CallbackQueryHandler(send_report, pattern='^send_report$'))
-    dispatcher.add_handler(CallbackQueryHandler(select_task_for_report, pattern='^report_task_|^report_without_task$'))
-    
-    # Основные обработчики кнопок
     dispatcher.add_handler(CallbackQueryHandler(set_task, pattern='^set_task$'))
     dispatcher.add_handler(CallbackQueryHandler(add_user, pattern='^add_user$'))
     dispatcher.add_handler(CallbackQueryHandler(remove_user, pattern='^remove_user$'))
-    dispatcher.add_handler(CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'))
-    dispatcher.add_handler(CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$'))
-    dispatcher.add_handler(CallbackQueryHandler(confirm_task, pattern='^confirm_task$'))
-    dispatcher.add_handler(CallbackQueryHandler(report_work_type, pattern='^report_work_[0-9]+$'))
+    dispatcher.add_handler(CallbackQueryHandler(select_task_for_report, pattern='^report_task_|^report_without_task$'))
 
-    # ConversationHandler для админских функций (создание задач)
+    # ConversationHandler для создания задач
     task_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
             SETTING_TASK_DESCRIPTION: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    set_task_description
+                    lambda update, context: set_task_description(update, context, SETTING_TASK_AMOUNT)
                 )
             ],
             SETTING_TASK_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    set_task_amount
+                    lambda update, context: set_task_amount(update, context, ADDING_WORK_TYPES)
                 )
             ],
             ADDING_WORK_TYPES: [
                 CallbackQueryHandler(
-                    select_work_type,
+                    lambda update, context: select_work_type(update, context, SETTING_WORK_AMOUNT),
                     pattern='^add_work_[0-9]+$'
                 ),
                 CallbackQueryHandler(
@@ -889,7 +946,7 @@ def main() -> None:
             SETTING_WORK_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    set_work_amount
+                    lambda update, context: set_work_amount(update, context, ADDING_WORK_TYPES)
                 )
             ],
             CONFIRM_TASK: [
@@ -907,30 +964,22 @@ def main() -> None:
     )
     dispatcher.add_handler(task_conv_handler)
 
-    # ConversationHandler для управления пользователями
-    user_management_conv_handler = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(add_user, pattern='^add_user$'),
-            CallbackQueryHandler(remove_user, pattern='^remove_user$')
-        ],
-        states={
-            ADMIN_ADD_USER: [MessageHandler(Filters.text & ~Filters.command, add_user_handler)],
-            ADMIN_REMOVE_USER: [MessageHandler(Filters.text & ~Filters.command, remove_user_handler)]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel),
-            CallbackQueryHandler(manage_users, pattern='^manage_users$')
-        ],
-        per_message=True
-    )
-    dispatcher.add_handler(user_management_conv_handler)
-
     # ConversationHandler для отправки отчетов
     report_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(send_report, pattern='^send_report$')],
         states={
-            REPORTING_WORK_TYPE: [CallbackQueryHandler(report_work_type, pattern='^report_work_[0-9]+$')],
-            REPORTING_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, save_report)]
+            REPORTING_WORK_TYPE: [
+                CallbackQueryHandler(
+                    report_work_type,
+                    pattern='^report_work_[0-9]+$'
+                )
+            ],
+            REPORTING_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    save_report
+                )
+            ]
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
@@ -940,10 +989,38 @@ def main() -> None:
     )
     dispatcher.add_handler(report_conv_handler)
 
-    # Обработчик для неизвестных сообщений (должен быть последним!)
+    # ConversationHandler для управления пользователями
+    user_management_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(add_user, pattern='^add_user$'),
+            CallbackQueryHandler(remove_user, pattern='^remove_user$')
+        ],
+        states={
+            ADMIN_ADD_USER: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    add_user_handler
+                )
+            ],
+            ADMIN_REMOVE_USER: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    remove_user_handler
+                )
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CallbackQueryHandler(manage_users, pattern='^manage_users$')
+        ],
+        per_message=True
+    )
+    dispatcher.add_handler(user_management_conv_handler)
+
+    # Обработчик неизвестных сообщений
     dispatcher.add_handler(MessageHandler(
         Filters.text & ~Filters.command,
-        lambda update, context: show_main_menu(update, context)
+        unknown_message
     ))
 
     # Обработчик ошибок
@@ -954,9 +1031,12 @@ def main() -> None:
     job_queue.run_daily(delete_old_messages, time=time(hour=3, minute=0))
 
     # Запуск бота
-    updater.start_polling(drop_pending_updates=True)
-    updater.idle()
-    
+    try:
+        updater.start_polling(drop_pending_updates=True)
+        logger.info("Бот успешно запущен")
+        updater.idle()
+    except Exception as e:
+        logger.error(f"Ошибка при запуске бота: {e}")
+
 if __name__ == '__main__':
     main()
-
