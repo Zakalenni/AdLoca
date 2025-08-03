@@ -1,6 +1,7 @@
 import os
 import logging
 import socket
+import asyncio
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,12 +15,27 @@ from typing import Dict, List, Optional
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("bot.log")
+    ]
 )
 logger = logging.getLogger(__name__)
 
+# Увеличим уровень логирования для aiogram и asyncpg
+logging.getLogger("aiogram").setLevel(logging.WARNING)
+logging.getLogger("asyncpg").setLevel(logging.DEBUG)
+
 # Загружаем переменные окружения
 load_dotenv()
+
+# Проверка обязательных переменных
+REQUIRED_ENV_VARS = ['BOT_TOKEN', 'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE']
+for var in REQUIRED_ENV_VARS:
+    if not os.getenv(var):
+        logger.critical(f"Missing required environment variable: {var}")
+        raise ValueError(f"Missing required environment variable: {var}")
 
 # Инициализация бота
 bot = Bot(token=os.getenv('BOT_TOKEN'))
@@ -48,48 +64,75 @@ WORK_TYPES = [
 
 # --- Database Functions ---
 async def create_db_pool():
-    try:
-        host = os.getenv('PGHOST')
-        # Пробуем преобразовать домен в IPv4 адрес
+    max_retries = 3
+    retry_delay = 2
+    
+    for attempt in range(max_retries):
         try:
-            host = socket.gethostbyname(host)
-        except socket.gaierror:
-            pass  # Используем host как есть, если не удалось преобразовать
-
-        pool = await asyncpg.create_pool(
-            user=os.getenv('PGUSER'),
-            password=os.getenv('PGPASSWORD'),
-            database=os.getenv('PGDATABASE'),
-            host=host,
-            port=os.getenv('PGPORT'),
-            ssl='require',  # Важно для Railway
-            min_size=1,
-            max_size=10,
-            timeout=30,
-            command_timeout=60
-        )
-        
-        # Проверяем подключение
-        async with pool.acquire() as conn:
-            await conn.execute('SELECT 1')
+            # Получаем параметры подключения
+            host = os.getenv('PGHOST')
+            port = int(os.getenv('PGPORT'))
+            user = os.getenv('PGUSER')
+            password = os.getenv('PGPASSWORD')
+            database = os.getenv('PGDATABASE')
             
-        return pool
-        
-    except Exception as e:
-        logger.error(f"Error creating database pool: {e}")
-        raise
+            logger.debug(f"Attempting DB connection (attempt {attempt + 1}/{max_retries})")
+            logger.debug(f"Connection params: host={host}, port={port}, user={user}, db={database}")
+            
+            # Пробуем преобразовать хост в IP
+            try:
+                host = socket.gethostbyname(host)
+                logger.debug(f"Resolved host to IP: {host}")
+            except socket.gaierror as e:
+                logger.warning(f"Could not resolve hostname: {e}")
+                pass
+            
+            # Создаем пул соединений
+            pool = await asyncpg.create_pool(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
+                ssl='require',
+                min_size=1,
+                max_size=5,
+                timeout=30,
+                command_timeout=60,
+                server_settings={
+                    'application_name': 'production_bot',
+                    'search_path': 'public'
+                }
+            )
+            
+            # Проверяем подключение
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT 1")
+                logger.info("Database connection test successful")
+            
+            return pool
+            
+        except Exception as e:
+            logger.error(f"Database connection failed (attempt {attempt + 1}): {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                continue
+            raise
 
 async def init_db():
     try:
         pool = await create_db_pool()
         async with pool.acquire() as conn:
+            # Создаем таблицы, если их нет
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
                     username TEXT,
                     full_name TEXT,
                     is_admin BOOLEAN DEFAULT FALSE,
-                    is_active BOOLEAN DEFAULT TRUE
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             
@@ -100,7 +143,8 @@ async def init_db():
                     week_start DATE,
                     week_end DATE,
                     created_at TIMESTAMP DEFAULT NOW(),
-                    created_by BIGINT REFERENCES users(user_id)
+                    created_by BIGINT REFERENCES users(user_id),
+                    is_active BOOLEAN DEFAULT TRUE
                 )
             ''')
             
@@ -111,7 +155,8 @@ async def init_db():
                     work_type TEXT,
                     total_amount INTEGER,
                     assigned_amount INTEGER DEFAULT 0,
-                    completed_amount INTEGER DEFAULT 0
+                    completed_amount INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
             
@@ -125,9 +170,20 @@ async def init_db():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
+            
+            # Создаем индексы для улучшения производительности
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_work_user_id ON user_work(user_id)
+            ''')
+            await conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_user_work_plan_id ON user_work(plan_id)
+            ''')
+            
+        logger.info("Database initialized successfully")
         return pool
+        
     except Exception as e:
-        logger.error(f"Error initializing database: {e}")
+        logger.critical(f"Failed to initialize database: {str(e)}")
         raise
 
 # --- Helper Functions ---
@@ -354,7 +410,7 @@ async def start_report(message: types.Message, state: FSMContext):
                 "SELECT wp.plan_id, wp.work_type, wp.total_amount, wp.assigned_amount, wp.completed_amount "
                 "FROM work_plans wp "
                 "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
-                "WHERE wt.week_start = $1 AND wt.week_end = $2",
+                "WHERE wt.week_start = $1 AND wt.week_end = $2 AND wt.is_active = TRUE",
                 week_start, week_end
             )
             
@@ -533,27 +589,48 @@ async def user_management(message: types.Message):
 # --- Bot Setup ---
 async def on_startup(bot: Bot):
     try:
+        logger.info("Starting bot initialization...")
+        
+        # Проверка токена бота
+        me = await bot.get_me()
+        logger.info(f"Bot authorized as @{me.username} (ID: {me.id})")
+        
+        # Инициализация базы данных
         pool = await init_db()
         bot["pool"] = pool
-        logger.info("Database pool created successfully")
+        logger.info("Database pool initialized successfully")
         
-        # Проверяем подключение
+        # Проверка подключения к БД
         async with pool.acquire() as conn:
             await conn.execute("SELECT 1")
-            
+            logger.info("Database connection test successful")
+        
+        # Удаляем вебхук, если был
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted (if existed)")
+        
         logger.info("Bot started successfully")
+        
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.critical(f"Startup failed: {str(e)}", exc_info=True)
         raise
 
 async def on_shutdown(bot: Bot):
     try:
+        logger.info("Shutting down bot...")
+        
+        # Закрываем пул соединений
         pool = bot.get("pool")
         if pool:
             await pool.close()
             logger.info("Database pool closed successfully")
+            
+        # Закрываем сессию бота
+        await (await bot.get_session()).close()
+        logger.info("Bot session closed")
+        
     except Exception as e:
-        logger.error(f"Shutdown error: {e}")
+        logger.error(f"Error during shutdown: {str(e)}")
     finally:
         logger.info("Bot stopped")
 
@@ -563,12 +640,19 @@ async def main():
     dp.shutdown.register(on_shutdown)
     
     try:
-        await dp.start_polling(bot)
+        logger.info("Starting polling...")
+        await dp.start_polling(bot, handle_signals=False)
+    except asyncio.CancelledError:
+        logger.info("Polling cancelled")
     except Exception as e:
-        logger.error(f"Polling error: {e}")
+        logger.critical(f"Polling error: {str(e)}", exc_info=True)
     finally:
-        await bot.session.close()
+        logger.info("Bot process finished")
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.critical(f"Fatal error: {str(e)}", exc_info=True)
