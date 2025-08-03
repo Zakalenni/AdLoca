@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
@@ -24,22 +24,21 @@ dp = Dispatcher()
 
 # Состояния для FSM
 class AdminStates(StatesGroup):
-    WAITING_TASK_NAME = State()
+    WAITING_NEW_TASK = State()
+    WAITING_USER_SELECTION = State()
     WAITING_WORK_ASSIGNMENT = State()
-    WAITING_WORKER_SELECTION = State()
+    WAITING_QUANTITY = State()
 
-class WorkerStates(StatesGroup):
-    WAITING_WORK_SELECTION = State()
+class UserStates(StatesGroup):
     WAITING_PROGRESS_REPORT = State()
     WAITING_QUANTITY_REPORT = State()
+    WAITING_ADDITIONAL_WORK = State()
 
-# База данных
-tasks_db = {}  # {task_id: {name, assigned_works: {work_type: {worker_id: quantity}}}}
-reports_db = {}  # {user_id: {date: [{work_type, progress, quantity, task_id}]}}
-users_db = {}  # {user_id: {"name": full_name, "username": username}}
-
-# Виды работ
-WORK_TYPES = [
+# Базы данных
+reports_db = {}
+tasks_db = {}
+allowed_users = set()
+work_types = [
     "Распил доски", "Фугование", "Рейсмусование", "Распил на детали",
     "Отверстия в пласть", "Присадка отверстий", "Фрезеровка пазов",
     "Фрезеровка углов", "Шлифовка", "Подрез", "Сборка", "Дошлифовка",
@@ -48,387 +47,256 @@ WORK_TYPES = [
     "Фрезеровка пазов ручек", "Распил на ручки"
 ]
 
-# --- Вспомогательные функции ---
-async def delete_previous_message(message: types.Message):
-    """Безопасное удаление предыдущего сообщения"""
-    try:
-        await message.delete()
-    except Exception as e:
-        logger.error(f"Ошибка при удалении сообщения: {e}")
+# Инициализация администратора
+if os.getenv('ADMIN_ID'):
+    allowed_users.add(int(os.getenv('ADMIN_ID')))
 
+# --- Вспомогательные функции ---
 def get_current_date():
-    """Возвращает текущую дату в формате DD.MM.YYYY"""
     return datetime.now().strftime("%d.%m.%Y")
 
-def get_current_weekday():
-    """Возвращает текущий день недели"""
-    days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Саббота", "Воскресенье"]
+def get_weekday():
+    days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
     return days[datetime.now().weekday()]
 
-def register_user(user: types.User):
-    """Регистрирует/обновляет информацию о пользователе"""
-    users_db[user.id] = {
-        "name": user.full_name,
-        "username": user.username
-    }
-
-def get_user_name(user_id: int) -> str:
-    """Возвращает имя пользователя"""
-    user = users_db.get(user_id, {})
-    return user.get("name", f"User_{user_id}")
-
-# --- Клавиатуры ---
-def get_admin_main_kb():
-    """Основная клавиатура администратора"""
-    builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(
-        text="📌 Поставить задачу",
-        callback_data="admin_create_task"
-    ))
-    builder.add(types.InlineKeyboardButton(
-        text="📊 Сводный отчет",
-        callback_data="admin_get_report"
-    ))
-    builder.adjust(1)
-    return builder.as_markup()
-
-def get_worker_main_kb():
-    """Основная клавиатура работника"""
-    builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(
-        text="📝 Отправить отчет",
-        callback_data="worker_send_report"
-    ))
-    builder.add(types.InlineKeyboardButton(
-        text="📋 Мои отчеты",
-        callback_data="worker_my_reports"
-    ))
-    builder.adjust(1)
-    return builder.as_markup()
-
-def get_work_types_kb(action: str = "select"):
-    """Клавиатура с видами работ"""
-    builder = InlineKeyboardBuilder()
-    for work in WORK_TYPES:
-        builder.add(types.InlineKeyboardButton(
-            text=work,
-            callback_data=f"{action}_{work}"
-        ))
-    builder.adjust(2)
-    return builder.as_markup()
-
-def get_workers_kb():
-    """Клавиатура с работниками"""
-    builder = InlineKeyboardBuilder()
-    for user_id, user_data in users_db.items():
-        builder.add(types.InlineKeyboardButton(
-            text=user_data["name"],
-            callback_data=f"assign_{user_id}"
-        ))
-    builder.adjust(1)
-    return builder.as_markup()
+def get_work_type_kb():
+    builder = ReplyKeyboardBuilder()
+    for work in work_types:
+        builder.add(types.KeyboardButton(text=work))
+    builder.adjust(3)
+    return builder.as_markup(resize_keyboard=True)
 
 def get_progress_kb():
-    """Клавиатура с процентами выполнения"""
     builder = ReplyKeyboardBuilder()
     for i in range(0, 101, 10):
         builder.add(types.KeyboardButton(text=f"{i}%"))
     builder.adjust(5)
     return builder.as_markup(resize_keyboard=True)
 
-# --- Генерация отчетов ---
-def generate_worker_report(user_id: int) -> str:
-    """Генерирует отчет для работника"""
-    if user_id not in reports_db or not reports_db[user_id]:
-        return "📭 У вас пока нет отчетов"
-    
-    report = ["📊 <b>Ваши отчеты</b>\n"]
-    for date, records in reports_db[user_id].items():
-        report.append(f"\n📅 <b>{date}</b>")
-        for record in records:
-            task_name = tasks_db.get(record.get("task_id", ""), {}).get("name", "Общая задача")
-            report.append(
-                f"\n  • {task_name}: {record['work_type']}\n"
-                f"    ▸ Выполнено: {record['progress']}%\n"
-                f"    ▸ Количество: {record.get('quantity', 'N/A')}"
-            )
-    
-    return "\n".join(report)
+def get_quantity_kb():
+    builder = ReplyKeyboardBuilder()
+    for i in [1, 2, 5, 10, 20, 50, 100]:
+        builder.add(types.KeyboardButton(text=str(i)))
+    builder.add(types.KeyboardButton(text="Другое количество"))
+    builder.adjust(3)
+    return builder.as_markup(resize_keyboard=True)
 
-def generate_admin_report() -> str:
-    """Генерирует сводный отчет для администратора"""
-    if not reports_db:
-        return "📭 Нет данных по выполнению работ"
-    
-    report = ["📊 <b>Сводный отчет по выполнению работ</b>\n"]
-    
-    # Отчет по задачам
-    report.append("\n<b>Текущие задачи:</b>")
-    for task_id, task_data in tasks_db.items():
-        report.append(f"\n📌 <b>{task_data['name']}</b> (ID: {task_id})")
-        for work_type, workers in task_data.get("assigned_works", {}).items():
-            report.append(f"\n  🔧 {work_type}:")
-            for worker_id, quantity in workers.items():
-                report.append(f"    👷 {get_user_name(worker_id)}: {quantity} шт.")
-    
-    # Отчет по выполнению
-    report.append("\n\n<b>Выполнение работ:</b>")
-    for user_id, user_data in reports_db.items():
-        report.append(f"\n👷 <b>{get_user_name(user_id)}</b>")
-        for date, records in user_data.items():
-            report.append(f"\n  📅 {date}")
-            for record in records:
-                task_name = tasks_db.get(record.get("task_id", ""), {}).get("name", "Общая задача")
-                report.append(
-                    f"    • {task_name}: {record['work_type']}\n"
-                    f"      ▸ Выполнено: {record['progress']}%\n"
-                    f"      ▸ Количество: {record.get('quantity', 'N/A')}"
-                )
-    
-    return "\n".join(report)
+def get_admin_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="/new_task"))
+    builder.add(types.KeyboardButton(text="/admin_report"))
+    builder.add(types.KeyboardButton(text="/manage_users"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_user_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.add(types.KeyboardButton(text="/new_report"))
+    builder.add(types.KeyboardButton(text="/my_reports"))
+    builder.adjust(2)
+    return builder.as_markup(resize_keyboard=True)
+
+async def delete_previous_message(message: types.Message):
+    try:
+        await message.delete()
+    except:
+        pass
 
 # --- Обработчики команд ---
-@dp.message(Command("start"))
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    register_user(message.from_user)
+    user_id = message.from_user.id
     
-    if str(message.from_user.id) == os.getenv('ADMIN_ID'):
+    if user_id in allowed_users:
         await message.answer(
-            "👨‍💻 <b>Панель администратора</b>",
-            reply_markup=get_admin_main_kb(),
+            "👨‍💻 <b>Режим администратора</b>",
+            reply_markup=get_admin_kb(),
             parse_mode="HTML"
         )
     else:
         await message.answer(
-            "👷 <b>Панель работника</b>",
-            reply_markup=get_worker_main_kb(),
+            "👷 <b>Система учета работ</b>\n\n"
+            "Используйте /new_report для отправки отчета",
+            reply_markup=get_user_kb(),
             parse_mode="HTML"
         )
 
-# --- Обработчики администратора ---
-@dp.callback_query(F.data == "admin_create_task")
-async def admin_create_task(callback: types.CallbackQuery, state: FSMContext):
-    await delete_previous_message(callback.message)
-    await callback.message.answer(
+# --- Административные команды ---
+@dp.message(Command("new_task"), F.from_user.id.in_(allowed_users))
+async def cmd_new_task(message: types.Message, state: FSMContext):
+    await delete_previous_message(message)
+    await state.set_state(AdminStates.WAITING_NEW_TASK)
+    await message.answer(
         "📝 Введите название новой задачи:",
         reply_markup=types.ReplyKeyboardRemove()
     )
-    await state.set_state(AdminStates.WAITING_TASK_NAME)
-    await callback.answer()
 
-@dp.message(AdminStates.WAITING_TASK_NAME)
-async def process_task_name(message: types.Message, state: FSMContext):
-    task_id = str(datetime.now().timestamp())
-    tasks_db[task_id] = {
-        "name": message.text,
-        "assigned_works": {}
-    }
-    await state.update_data(task_id=task_id)
+@dp.message(AdminStates.WAITING_NEW_TASK)
+async def process_new_task(message: types.Message, state: FSMContext):
+    await state.update_data(task_name=message.text)
     await state.set_state(AdminStates.WAITING_WORK_ASSIGNMENT)
     await message.answer(
-        f"✅ Задача '{message.text}' создана\n\n"
-        "Выберите вид работы для назначения:",
-        reply_markup=get_work_types_kb("assign_work")
+        "Выберите вид работы:",
+        reply_markup=get_work_type_kb()
     )
 
-@dp.callback_query(F.data.startswith("assign_work_"), AdminStates.WAITING_WORK_ASSIGNMENT)
-async def select_work_for_assignment(callback: types.CallbackQuery, state: FSMContext):
-    work_type = callback.data.split("_", 2)[2]
-    await state.update_data(work_type=work_type)
-    await delete_previous_message(callback.message)
-    await callback.message.answer(
-        f"Выберите работника для назначения '{work_type}':",
-        reply_markup=get_workers_kb()
-    )
-    await state.set_state(AdminStates.WAITING_WORKER_SELECTION)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("assign_"), AdminStates.WAITING_WORKER_SELECTION)
-async def assign_worker_to_work(callback: types.CallbackQuery, state: FSMContext):
-    worker_id = int(callback.data.split("_")[1])
-    data = await state.get_data()
-    
-    task_id = data["task_id"]
-    work_type = data["work_type"]
-    
-    if task_id not in tasks_db:
-        await callback.message.answer("Ошибка: задача не найдена")
-        await state.clear()
+@dp.message(AdminStates.WAITING_WORK_ASSIGNMENT)
+async def process_work_assignment(message: types.Message, state: FSMContext):
+    if message.text not in work_types:
+        await message.answer("Пожалуйста, выберите вид работы из предложенных")
         return
     
-    if "assigned_works" not in tasks_db[task_id]:
-        tasks_db[task_id]["assigned_works"] = {}
-    
-    if work_type not in tasks_db[task_id]["assigned_works"]:
-        tasks_db[task_id]["assigned_works"][work_type] = {}
-    
-    await callback.message.answer(
-        f"Введите количество для {work_type} (целое число):",
-        reply_markup=types.ReplyKeyboardRemove()
+    await state.update_data(work_type=message.text)
+    await state.set_state(AdminStates.WAITING_QUANTITY)
+    await message.answer(
+        "Укажите количество:",
+        reply_markup=get_quantity_kb()
     )
-    
-    await state.update_data(worker_id=worker_id)
-    await callback.answer()
 
-@dp.message(AdminStates.WAITING_WORKER_SELECTION)
-async def process_work_quantity(message: types.Message, state: FSMContext):
+@dp.message(AdminStates.WAITING_QUANTITY)
+async def process_quantity(message: types.Message, state: FSMContext):
     try:
         quantity = int(message.text)
-        if quantity <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Пожалуйста, введите положительное целое число")
+    except:
+        await message.answer("Пожалуйста, введите число")
         return
     
     data = await state.get_data()
-    task_id = data["task_id"]
-    work_type = data["work_type"]
-    worker_id = data["worker_id"]
+    task_name = data['task_name']
+    work_type = data['work_type']
     
-    tasks_db[task_id]["assigned_works"][work_type][worker_id] = quantity
+    if task_name not in tasks_db:
+        tasks_db[task_name] = {}
     
-    worker_name = get_user_name(worker_id)
-    await message.answer(
-        f"✅ Назначение добавлено:\n"
-        f"👷 Работник: {worker_name}\n"
-        f"🔧 Работа: {work_type}\n"
-        f"🔢 Количество: {quantity}",
-        reply_markup=get_admin_main_kb()
-    )
-    
-    # Уведомляем работника
-    try:
-        await bot.send_message(
-            chat_id=worker_id,
-            text=f"📌 Вам назначена новая работа:\n\n"
-                 f"📝 Задача: {tasks_db[task_id]['name']}\n"
-                 f"🔧 Вид работы: {work_type}\n"
-                 f"🔢 Количество: {quantity}",
-            reply_markup=get_worker_main_kb()
-        )
-    except Exception as e:
-        logger.error(f"Ошибка уведомления работника: {e}")
+    tasks_db[task_name][work_type] = quantity
     
     await state.clear()
+    await message.answer(
+        f"✅ Задача добавлена:\n\n"
+        f"<b>{task_name}</b>\n"
+        f"🔧 {work_type}\n"
+        f"📦 Количество: {quantity}",
+        reply_markup=get_admin_kb(),
+        parse_mode="HTML"
+    )
 
-@dp.callback_query(F.data == "admin_get_report")
-async def admin_get_report(callback: types.CallbackQuery):
-    await delete_previous_message(callback.message)
+@dp.message(Command("admin_report"), F.from_user.id.in_(allowed_users))
+async def cmd_admin_report(message: types.Message):
     report = generate_admin_report()
-    await callback.message.answer(report, parse_mode="HTML")
-    await callback.answer()
-
-# --- Обработчики работника ---
-@dp.callback_query(F.data == "worker_send_report")
-async def worker_send_report(callback: types.CallbackQuery, state: FSMContext):
-    await delete_previous_message(callback.message)
-    await callback.message.answer(
-        "Выберите вид выполненной работы:",
-        reply_markup=get_work_types_kb("report_work")
+    await delete_previous_message(message)
+    await message.answer(
+        report,
+        parse_mode="HTML",
+        reply_markup=get_admin_kb()
     )
-    await state.set_state(WorkerStates.WAITING_WORK_SELECTION)
-    await callback.answer()
 
-@dp.callback_query(F.data.startswith("report_work_"), WorkerStates.WAITING_WORK_SELECTION)
-async def select_work_for_report(callback: types.CallbackQuery, state: FSMContext):
-    work_type = callback.data.split("_", 2)[2]
-    await state.update_data(work_type=work_type)
-    await delete_previous_message(callback.message)
-    await callback.message.answer(
-        f"Укажите процент выполнения для '{work_type}':",
-        reply_markup=get_progress_kb()
+@dp.message(Command("manage_users"), F.from_user.id.in_(allowed_users))
+async def cmd_manage_users(message: types.Message, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.add(types.InlineKeyboardButton(
+        text="Добавить пользователя",
+        callback_data="add_user"
+    ))
+    builder.add(types.InlineKeyboardButton(
+        text="Удалить пользователя",
+        callback_data="remove_user"
+    ))
+    await message.answer(
+        "Управление пользователями:",
+        reply_markup=builder.as_markup()
     )
-    await state.set_state(WorkerStates.WAITING_PROGRESS_REPORT)
-    await callback.answer()
 
-@dp.message(WorkerStates.WAITING_PROGRESS_REPORT)
-async def process_progress_report(message: types.Message, state: FSMContext):
-    try:
-        progress = int(message.text.replace("%", ""))
-        if not 0 <= progress <= 100:
-            raise ValueError
-    except ValueError:
-        await message.answer("Пожалуйста, укажите процент от 0 до 100")
+# --- Пользовательские команды ---
+@dp.message(Command("new_report"))
+async def cmd_new_report(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    if user_id not in allowed_users:
+        await message.answer("У вас нет доступа к этой команде")
         return
     
-    await state.update_data(progress=progress)
+    await delete_previous_message(message)
+    await state.set_state(UserStates.WAITING_PROGRESS_REPORT)
     await message.answer(
-        "Введите количество выполненного (целое число):",
-        reply_markup=types.ReplyKeyboardRemove()
+        "Выберите вид работы:",
+        reply_markup=get_work_type_kb()
     )
-    await state.set_state(WorkerStates.WAITING_QUANTITY_REPORT)
 
-@dp.message(WorkerStates.WAITING_QUANTITY_REPORT)
+@dp.message(Command("my_reports"))
+async def cmd_my_reports(message: types.Message):
+    user_id = message.from_user.id
+    report = generate_user_report(user_id)
+    await delete_previous_message(message)
+    await message.answer(
+        f"📊 <b>Ваши отчеты</b>\n\n{report}",
+        parse_mode="HTML",
+        reply_markup=get_user_kb()
+    )
+
+# --- Генерация отчетов ---
+def generate_admin_report():
+    if not reports_db:
+        return "📊 <b>Сводный отчет</b>\n\nНет данных о выполненных работах"
+    
+    report = ["📊 <b>Сводный отчет</b>\n"]
+    current_date = get_current_date()
+    
+    for user_id, user_data in reports_db.items():
+        if current_date in user_data:
+            report.append(f"\n👤 <b>{user_data.get('name', f'Пользователь {user_id}')}</b>")
+            for record in user_data[current_date]:
+                report.append(
+                    f"  • {record['work_type']}: {record['progress']}% "
+                    f"({record.get('quantity', 'N/A')} шт.)"
+                )
+    
+    return "\n".join(report)
+
+def generate_user_report(user_id):
+    if user_id not in reports_db or not reports_db[user_id]:
+        return "У вас пока нет отчетов"
+    
+    report = ["📊 <b>Ваши отчеты</b>\n"]
+    for date, records in reports_db[user_id].items():
+        if date == "name":
+            continue
+        report.append(f"\n📅 {date}")
+        for record in records:
+            report.append(
+                f"  • {record['work_type']}: {record['progress']}% "
+                f"({record.get('quantity', 'N/A')} шт.)"
+            )
+    
+    return "\n".join(report)
+
+# --- Обработчики состояний пользователя ---
+@dp.message(UserStates.WAITING_PROGRESS_REPORT)
+async def process_work_type_report(message: types.Message, state: FSMContext):
+    if message.text not in work_types:
+        await message.answer("Пожалуйста, выберите вид работы из предложенных")
+        return
+    
+    await state.update_data(work_type=message.text)
+    await state.set_state(UserStates.WAITING_QUANTITY_REPORT)
+    await message.answer(
+        "Укажите количество выполненного:",
+        reply_markup=get_quantity_kb()
+    )
+
+@dp.message(UserStates.WAITING_QUANTITY_REPORT)
 async def process_quantity_report(message: types.Message, state: FSMContext):
     try:
         quantity = int(message.text)
-        if quantity <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("Пожалуйста, введите положительное целое число")
+    except:
+        await message.answer("Пожалуйста, введите число")
         return
     
-    data = await state.get_data()
-    user_id = message.from_user.id
-    current_date = get_current_date()
-    
-    if user_id not in reports_db:
-        reports_db[user_id] = {}
-    
-    if current_date not in reports_db[user_id]:
-        reports_db[user_id][current_date] = []
-    
-    # Находим задачу, к которой относится эта работа
-    task_id = None
-    for t_id, task in tasks_db.items():
-        if data["work_type"] in task.get("assigned_works", {}):
-            if user_id in task["assigned_works"][data["work_type"]]:
-                task_id = t_id
-                break
-    
-    reports_db[user_id][current_date].append({
-        "work_type": data["work_type"],
-        "progress": data["progress"],
-        "quantity": quantity,
-        "task_id": task_id
-    })
-    
+    await state.update_data(quantity=quantity)
+    await state.set_state(UserStates.WAITING_PROGRESS_REPORT)
     await message.answer(
-        "✅ <b>Отчет сохранен</b>\n\n"
-        f"📅 Дата: {current_date}\n"
-        f"🔧 Вид работы: {data['work_type']}\n"
-        f"📊 Выполнено: {data['progress']}%\n"
-        f"🔢 Количество: {quantity}",
-        parse_mode="HTML",
-        reply_markup=get_worker_main_kb()
+        "Укажите процент выполнения:",
+        reply_markup=get_progress_kb()
     )
-    
-    # Уведомляем администратора
-    admin_id = os.getenv('ADMIN_ID')
-    if admin_id:
-        try:
-            task_name = tasks_db.get(task_id, {}).get("name", "Общая задача") if task_id else "Общая задача"
-            await bot.send_message(
-                chat_id=int(admin_id),
-                text=f"📌 Новый отчет от {message.from_user.full_name}\n\n"
-                     f"📅 {current_date}\n"
-                     f"📝 Задача: {task_name}\n"
-                     f"🔧 {data['work_type']}\n"
-                     f"📊 {data['progress']}%, {quantity} шт.",
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка уведомления админа: {e}")
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "worker_my_reports")
-async def worker_my_reports(callback: types.CallbackQuery):
-    await delete_previous_message(callback.message)
-    report = generate_worker_report(callback.from_user.id)
-    await callback.message.answer(report, parse_mode="HTML")
-    await callback.answer()
 
 # Запуск бота
 async def main():
