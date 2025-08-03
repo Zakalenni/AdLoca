@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Увеличим уровень логирования для aiogram и asyncpg
+# Увеличим уровень логирования для дебага
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("asyncpg").setLevel(logging.DEBUG)
 
@@ -62,10 +62,11 @@ WORK_TYPES = [
     "Распил на ручки"
 ]
 
-# --- Database Functions ---
+# --- Database Functions with Retry Logic ---
 async def create_db_pool():
-    max_retries = 3
-    retry_delay = 2
+    max_retries = 5
+    retry_delay = 3
+    last_error = None
     
     for attempt in range(max_retries):
         try:
@@ -76,18 +77,9 @@ async def create_db_pool():
             password = os.getenv('PGPASSWORD')
             database = os.getenv('PGDATABASE')
             
-            logger.debug(f"Attempting DB connection (attempt {attempt + 1}/{max_retries})")
-            logger.debug(f"Connection params: host={host}, port={port}, user={user}, db={database}")
+            logger.info(f"Attempting DB connection (attempt {attempt + 1}/{max_retries})")
             
-            # Пробуем преобразовать хост в IP
-            try:
-                host = socket.gethostbyname(host)
-                logger.debug(f"Resolved host to IP: {host}")
-            except socket.gaierror as e:
-                logger.warning(f"Could not resolve hostname: {e}")
-                pass
-            
-            # Создаем пул соединений
+            # Увеличиваем таймауты для Railway
             pool = await asyncpg.create_pool(
                 host=host,
                 port=port,
@@ -97,33 +89,40 @@ async def create_db_pool():
                 ssl='require',
                 min_size=1,
                 max_size=5,
-                timeout=30,
-                command_timeout=60,
+                timeout=120,  # Увеличенный таймаут
+                command_timeout=120,
+                connection_timeout=60,
                 server_settings={
                     'application_name': 'production_bot',
-                    'search_path': 'public'
+                    'statement_timeout': '30000'  # 30 секунд на запрос
                 }
             )
             
-            # Проверяем подключение
+            # Проверка подключения
             async with pool.acquire() as conn:
                 await conn.execute("SELECT 1")
                 logger.info("Database connection test successful")
             
             return pool
             
-        except Exception as e:
-            logger.error(f"Database connection failed (attempt {attempt + 1}): {str(e)}")
+        except (asyncio.TimeoutError, asyncpg.CannotConnectNowError, ConnectionRefusedError) as e:
+            last_error = e
+            logger.warning(f"Connection attempt {attempt + 1} failed: {str(e)}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 continue
             raise
+        except Exception as e:
+            last_error = e
+            logger.error(f"Unexpected DB connection error: {str(e)}")
+            raise
+    
+    raise ConnectionError(f"Failed to connect after {max_retries} attempts. Last error: {str(last_error)}")
 
 async def init_db():
     try:
         pool = await create_db_pool()
         async with pool.acquire() as conn:
-            # Создаем таблицы, если их нет
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS users (
                     user_id BIGINT PRIMARY KEY,
@@ -586,7 +585,7 @@ async def user_management(message: types.Message):
         logger.error(f"Error in user_management: {e}")
         await message.answer("⚠️ Произошла ошибка при подключении к базе данных.")
 
-# --- Bot Setup ---
+# --- Bot Setup with Health Checks ---
 async def on_startup(bot: Bot):
     try:
         logger.info("Starting bot initialization...")
@@ -595,19 +594,15 @@ async def on_startup(bot: Bot):
         me = await bot.get_me()
         logger.info(f"Bot authorized as @{me.username} (ID: {me.id})")
         
-        # Инициализация базы данных
+        # Инициализация базы данных с повторными попытками
         pool = await init_db()
         bot["pool"] = pool
         logger.info("Database pool initialized successfully")
         
-        # Проверка подключения к БД
+        # Дополнительная проверка соединения
         async with pool.acquire() as conn:
-            await conn.execute("SELECT 1")
-            logger.info("Database connection test successful")
-        
-        # Удаляем вебхук, если был
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook deleted (if existed)")
+            db_time = await conn.fetchval("SELECT NOW()")
+            logger.info(f"Database time check: {db_time}")
         
         logger.info("Bot started successfully")
         
@@ -619,31 +614,44 @@ async def on_shutdown(bot: Bot):
     try:
         logger.info("Shutting down bot...")
         
-        # Закрываем пул соединений
-        pool = bot.get("pool")
-        if pool:
+        # Корректное закрытие соединений
+        if "pool" in bot.data:
+            pool = bot["pool"]
             await pool.close()
-            logger.info("Database pool closed successfully")
+            logger.info("Database pool closed")
             
-        # Закрываем сессию бота
-        await (await bot.get_session()).close()
-        logger.info("Bot session closed")
+        await bot.session.close()
+        logger.info("HTTP session closed")
         
     except Exception as e:
-        logger.error(f"Error during shutdown: {str(e)}")
+        logger.error(f"Shutdown error: {str(e)}")
     finally:
         logger.info("Bot stopped")
 
-# Запуск бота
+# --- Health Check Command ---
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            db_time = await conn.fetchval("SELECT NOW()")
+            await message.answer(f"✅ Bot is alive\nDatabase time: {db_time}")
+    except Exception as e:
+        await message.answer(f"❌ Database error: {str(e)}")
+
+# --- Main Polling with Error Handling ---
 async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
     
     try:
         logger.info("Starting polling...")
-        await dp.start_polling(bot, handle_signals=False)
+        await dp.start_polling(bot, 
+                             handle_signals=False,
+                             close_bot_session=True,
+                             allowed_updates=types.Update.ALL_TYPES)
     except asyncio.CancelledError:
-        logger.info("Polling cancelled")
+        logger.info("Polling cancelled gracefully")
     except Exception as e:
         logger.critical(f"Polling error: {str(e)}", exc_info=True)
     finally:
