@@ -683,6 +683,10 @@ def main() -> None:
     dispatcher.add_handler(CommandHandler("start", start))
     
     # ... остальной код обработчиков ...
+    dispatcher.add_handler(CallbackQueryHandler(main_menu, pattern='^main_menu$'))
+    dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
+    dispatcher.add_handler(CallbackQueryHandler(send_report, pattern='^send_report$'))
+    dispatcher.add_handler(CallbackQueryHandler(view_tasks, pattern='^view_tasks$'))
 
     # Планировщик для удаления старых сообщений (раз в день)
     job_queue = updater.job_queue
@@ -694,6 +698,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
