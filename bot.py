@@ -648,8 +648,7 @@ async def main():
         logger.info("Starting polling...")
         await dp.start_polling(bot, 
                              handle_signals=False,
-                             close_bot_session=True,
-                             allowed_updates=types.Update.ALL_TYPES)
+                             close_bot_session=True)
     except asyncio.CancelledError:
         logger.info("Polling cancelled gracefully")
     except Exception as e:
