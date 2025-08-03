@@ -1,5 +1,6 @@
 import os
 import logging
+import socket
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -47,60 +48,87 @@ WORK_TYPES = [
 
 # --- Database Functions ---
 async def create_db_pool():
-    return await asyncpg.create_pool(
-        user=os.getenv('PGUSER'),
-        password=os.getenv('PGPASSWORD'),
-        database=os.getenv('PGDATABASE'),
-        host=os.getenv('PGHOST'),
-        port=os.getenv('PGPORT')
-    )
+    try:
+        host = os.getenv('PGHOST')
+        # Пробуем преобразовать домен в IPv4 адрес
+        try:
+            host = socket.gethostbyname(host)
+        except socket.gaierror:
+            pass  # Используем host как есть, если не удалось преобразовать
+
+        pool = await asyncpg.create_pool(
+            user=os.getenv('PGUSER'),
+            password=os.getenv('PGPASSWORD'),
+            database=os.getenv('PGDATABASE'),
+            host=host,
+            port=os.getenv('PGPORT'),
+            ssl='require',  # Важно для Railway
+            min_size=1,
+            max_size=10,
+            timeout=30,
+            command_timeout=60
+        )
+        
+        # Проверяем подключение
+        async with pool.acquire() as conn:
+            await conn.execute('SELECT 1')
+            
+        return pool
+        
+    except Exception as e:
+        logger.error(f"Error creating database pool: {e}")
+        raise
 
 async def init_db():
-    pool = await create_db_pool()
-    async with pool.acquire() as conn:
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                is_admin BOOLEAN DEFAULT FALSE,
-                is_active BOOLEAN DEFAULT TRUE
-            )
-        ''')
-        
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS weekly_tasks (
-                task_id SERIAL PRIMARY KEY,
-                description TEXT,
-                week_start DATE,
-                week_end DATE,
-                created_at TIMESTAMP DEFAULT NOW(),
-                created_by BIGINT REFERENCES users(user_id)
-            )
-        ''')
-        
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS work_plans (
-                plan_id SERIAL PRIMARY KEY,
-                task_id INTEGER REFERENCES weekly_tasks(task_id),
-                work_type TEXT,
-                total_amount INTEGER,
-                assigned_amount INTEGER DEFAULT 0,
-                completed_amount INTEGER DEFAULT 0
-            )
-        ''')
-        
-        await conn.execute('''
-            CREATE TABLE IF NOT EXISTS user_work (
-                record_id SERIAL PRIMARY KEY,
-                user_id BIGINT REFERENCES users(user_id),
-                plan_id INTEGER REFERENCES work_plans(plan_id),
-                date DATE,
-                amount INTEGER,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        ''')
-    return pool
+    try:
+        pool = await create_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    username TEXT,
+                    full_name TEXT,
+                    is_admin BOOLEAN DEFAULT FALSE,
+                    is_active BOOLEAN DEFAULT TRUE
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS weekly_tasks (
+                    task_id SERIAL PRIMARY KEY,
+                    description TEXT,
+                    week_start DATE,
+                    week_end DATE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    created_by BIGINT REFERENCES users(user_id)
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS work_plans (
+                    plan_id SERIAL PRIMARY KEY,
+                    task_id INTEGER REFERENCES weekly_tasks(task_id),
+                    work_type TEXT,
+                    total_amount INTEGER,
+                    assigned_amount INTEGER DEFAULT 0,
+                    completed_amount INTEGER DEFAULT 0
+                )
+            ''')
+            
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_work (
+                    record_id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES users(user_id),
+                    plan_id INTEGER REFERENCES work_plans(plan_id),
+                    date DATE,
+                    amount INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+        return pool
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        raise
 
 # --- Helper Functions ---
 def get_current_week_dates():
@@ -170,69 +198,81 @@ def get_user_management_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow(
-            "SELECT * FROM users WHERE user_id = $1",
-            message.from_user.id
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT * FROM users WHERE user_id = $1",
+                message.from_user.id
+            )
+            
+            if not user:
+                await conn.execute(
+                    "INSERT INTO users (user_id, username, full_name) VALUES ($1, $2, $3)",
+                    message.from_user.id,
+                    message.from_user.username,
+                    message.from_user.full_name
+                )
+                await message.answer(
+                    "👋 Добро пожаловать! Ожидайте подтверждения регистрации администратором."
+                )
+                return
+            
+            if not user['is_active']:
+                await message.answer("⛔ Ваш аккаунт деактивирован. Обратитесь к администратору.")
+                return
+        
+        await message.answer(
+            "🏠 Главное меню",
+            reply_markup=get_main_menu_kb(user['is_admin'])
         )
-        
-        if not user:
-            await conn.execute(
-                "INSERT INTO users (user_id, username, full_name) VALUES ($1, $2, $3)",
-                message.from_user.id,
-                message.from_user.username,
-                message.from_user.full_name
-            )
-            await message.answer(
-                "👋 Добро пожаловать! Ожидайте подтверждения регистрации администратором."
-            )
-            return
-        
-        if not user['is_active']:
-            await message.answer("⛔ Ваш аккаунт деактивирован. Обратитесь к администратору.")
-            return
-    
-    await message.answer(
-        "🏠 Главное меню",
-        reply_markup=get_main_menu_kb(user['is_admin'])
-    )
+    except Exception as e:
+        logger.error(f"Error in cmd_start: {e}")
+        await message.answer("⚠️ Произошла ошибка при подключении к базе данных. Попробуйте позже.")
 
 @dp.message(F.text == "🔙 Главное меню")
 async def back_to_main(message: types.Message, state: FSMContext):
     await state.clear()
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        user = await conn.fetchrow(
-            "SELECT is_admin FROM users WHERE user_id = $1 AND is_active = TRUE",
-            message.from_user.id
-        )
-        
-        if not user:
-            return
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT is_admin FROM users WHERE user_id = $1 AND is_active = TRUE",
+                message.from_user.id
+            )
             
-    await message.answer(
-        "🏠 Главное меню",
-        reply_markup=get_main_menu_kb(user['is_admin'])
-    )
+            if not user:
+                return
+                
+        await message.answer(
+            "🏠 Главное меню",
+            reply_markup=get_main_menu_kb(user['is_admin'])
+        )
+    except Exception as e:
+        logger.error(f"Error in back_to_main: {e}")
+        await message.answer("⚠️ Произошла ошибка при подключении к базе данных.")
 
 # --- Admin Handlers ---
 @dp.message(F.text == "👨‍💻 Администрирование")
 async def admin_menu(message: types.Message, state: FSMContext):
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        is_admin = await conn.fetchval(
-            "SELECT is_admin FROM users WHERE user_id = $1",
-            message.from_user.id
-        )
-        
-        if not is_admin:
-            return
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            is_admin = await conn.fetchval(
+                "SELECT is_admin FROM users WHERE user_id = $1",
+                message.from_user.id
+            )
             
-    await message.answer(
-        "👨‍💻 Меню администратора",
-        reply_markup=get_admin_menu_kb()
-    )
+            if not is_admin:
+                return
+                
+        await message.answer(
+            "👨‍💻 Меню администратора",
+            reply_markup=get_admin_menu_kb()
+        )
+    except Exception as e:
+        logger.error(f"Error in admin_menu: {e}")
+        await message.answer("⚠️ Произошла ошибка при подключении к базе данных.")
 
 @dp.message(F.text == "📌 Поставить задачу")
 async def set_task_start(message: types.Message, state: FSMContext):
@@ -273,63 +313,71 @@ async def set_work_amount(message: types.Message, state: FSMContext):
     data = await state.get_data()
     week_start, week_end = get_current_week_dates()
     
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        # Создаем или получаем задачу на неделю
-        task_id = await conn.fetchval(
-            "INSERT INTO weekly_tasks (description, week_start, week_end, created_by) "
-            "VALUES ($1, $2, $3, $4) RETURNING task_id",
-            data['description'], week_start, week_end, message.from_user.id
-        )
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            # Создаем или получаем задачу на неделю
+            task_id = await conn.fetchval(
+                "INSERT INTO weekly_tasks (description, week_start, week_end, created_by) "
+                "VALUES ($1, $2, $3, $4) RETURNING task_id",
+                data['description'], week_start, week_end, message.from_user.id
+            )
+            
+            # Добавляем план работы
+            await conn.execute(
+                "INSERT INTO work_plans (task_id, work_type, total_amount) "
+                "VALUES ($1, $2, $3)",
+                task_id, data['work_type'], amount
+            )
         
-        # Добавляем план работы
-        await conn.execute(
-            "INSERT INTO work_plans (task_id, work_type, total_amount) "
-            "VALUES ($1, $2, $3)",
-            task_id, data['work_type'], amount
+        await state.clear()
+        await message.answer(
+            f"✅ Задача добавлена!\n\n"
+            f"📅 Неделя: {format_week_range(week_start)}\n"
+            f"📝 Описание: {data['description']}\n"
+            f"🔧 Вид работы: {data['work_type']}\n"
+            f"📊 Количество: {amount}",
+            reply_markup=get_admin_menu_kb()
         )
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Задача добавлена!\n\n"
-        f"📅 Неделя: {format_week_range(week_start)}\n"
-        f"📝 Описание: {data['description']}\n"
-        f"🔧 Вид работы: {data['work_type']}\n"
-        f"📊 Количество: {amount}",
-        reply_markup=get_admin_menu_kb()
-    )
+    except Exception as e:
+        logger.error(f"Error in set_work_amount: {e}")
+        await message.answer("⚠️ Произошла ошибка при сохранении задачи в базу данных.")
 
 # --- User Work Reporting ---
 @dp.message(F.text == "📝 Отправить отчет")
 async def start_report(message: types.Message, state: FSMContext):
     week_start, week_end = get_current_week_dates()
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        works = await conn.fetch(
-            "SELECT wp.plan_id, wp.work_type, wp.total_amount, wp.assigned_amount, wp.completed_amount "
-            "FROM work_plans wp "
-            "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
-            "WHERE wt.week_start = $1 AND wt.week_end = $2",
-            week_start, week_end
-        )
-        
-        if not works:
-            await message.answer("Нет активных задач на текущую неделю")
-            return
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            works = await conn.fetch(
+                "SELECT wp.plan_id, wp.work_type, wp.total_amount, wp.assigned_amount, wp.completed_amount "
+                "FROM work_plans wp "
+                "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
+                "WHERE wt.week_start = $1 AND wt.week_end = $2",
+                week_start, week_end
+            )
             
-    builder = InlineKeyboardBuilder()
-    for work in works:
-        builder.add(types.InlineKeyboardButton(
-            text=f"{work['work_type']} ({work['completed_amount']}/{work['total_amount']})",
-            callback_data=f"select_work_{work['plan_id']}"
-        ))
-    builder.adjust(1)
-    
-    await state.set_state(UserStates.WAITING_WORK_SELECTION)
-    await message.answer(
-        "Выберите вид работы для отчета:",
-        reply_markup=builder.as_markup()
-    )
+            if not works:
+                await message.answer("Нет активных задач на текущую неделю")
+                return
+                
+        builder = InlineKeyboardBuilder()
+        for work in works:
+            builder.add(types.InlineKeyboardButton(
+                text=f"{work['work_type']} ({work['completed_amount']}/{work['total_amount']})",
+                callback_data=f"select_work_{work['plan_id']}"
+            ))
+        builder.adjust(1)
+        
+        await state.set_state(UserStates.WAITING_WORK_SELECTION)
+        await message.answer(
+            "Выберите вид работы для отчета:",
+            reply_markup=builder.as_markup()
+        )
+    except Exception as e:
+        logger.error(f"Error in start_report: {e}")
+        await message.answer("⚠️ Произошла ошибка при получении списка задач.")
 
 @dp.callback_query(F.data.startswith("select_work_"), UserStates.WAITING_WORK_SELECTION)
 async def select_work_for_report(callback: types.CallbackQuery, state: FSMContext):
@@ -353,138 +401,173 @@ async def save_work_report(message: types.Message, state: FSMContext):
         return
     
     data = await state.get_data()
-    pool = message.bot.get("pool")
     
-    async with pool.acquire() as conn:
-        # Проверяем, не превышает ли выполненное количество общее
-        work = await conn.fetchrow(
-            "SELECT total_amount, completed_amount FROM work_plans WHERE plan_id = $1",
-            data['plan_id']
-        )
+    try:
+        pool = message.bot.get("pool")
         
-        if work['completed_amount'] + amount > work['total_amount']:
-            await message.answer(
-                f"Ошибка: общее выполнение превысит плановое количество ({work['total_amount']})"
+        async with pool.acquire() as conn:
+            # Проверяем, не превышает ли выполненное количество общее
+            work = await conn.fetchrow(
+                "SELECT total_amount, completed_amount FROM work_plans WHERE plan_id = $1",
+                data['plan_id']
             )
-            return
+            
+            if work['completed_amount'] + amount > work['total_amount']:
+                await message.answer(
+                    f"Ошибка: общее выполнение превысит плановое количество ({work['total_amount']})"
+                )
+                return
+            
+            # Сохраняем отчет
+            await conn.execute(
+                "INSERT INTO user_work (user_id, plan_id, date, amount) "
+                "VALUES ($1, $2, $3, $4)",
+                message.from_user.id, data['plan_id'], datetime.now().date(), amount
+            )
+            
+            # Обновляем счетчики
+            await conn.execute(
+                "UPDATE work_plans SET "
+                "completed_amount = completed_amount + $1, "
+                "assigned_amount = assigned_amount + $1 "
+                "WHERE plan_id = $2",
+                amount, data['plan_id']
+            )
+            
+            # Получаем информацию для отчета
+            work_info = await conn.fetchrow(
+                "SELECT wp.work_type, wt.description FROM work_plans wp "
+                "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
+                "WHERE wp.plan_id = $1",
+                data['plan_id']
+            )
         
-        # Сохраняем отчет
-        await conn.execute(
-            "INSERT INTO user_work (user_id, plan_id, date, amount) "
-            "VALUES ($1, $2, $3, $4)",
-            message.from_user.id, data['plan_id'], datetime.now().date(), amount
+        await state.clear()
+        await message.answer(
+            f"✅ Отчет сохранен!\n\n"
+            f"📝 Задача: {work_info['description']}\n"
+            f"🔧 Вид работы: {work_info['work_type']}\n"
+            f"📊 Выполнено: {amount}",
+            reply_markup=get_main_menu_kb()
         )
-        
-        # Обновляем счетчики
-        await conn.execute(
-            "UPDATE work_plans SET "
-            "completed_amount = completed_amount + $1, "
-            "assigned_amount = assigned_amount + $1 "
-            "WHERE plan_id = $2",
-            amount, data['plan_id']
-        )
-        
-        # Получаем информацию для отчета
-        work_info = await conn.fetchrow(
-            "SELECT wp.work_type, wt.description FROM work_plans wp "
-            "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
-            "WHERE wp.plan_id = $1",
-            data['plan_id']
-        )
-    
-    await state.clear()
-    await message.answer(
-        f"✅ Отчет сохранен!\n\n"
-        f"📝 Задача: {work_info['description']}\n"
-        f"🔧 Вид работы: {work_info['work_type']}\n"
-        f"📊 Выполнено: {amount}",
-        reply_markup=get_main_menu_kb()
-    )
+    except Exception as e:
+        logger.error(f"Error in save_work_report: {e}")
+        await message.answer("⚠️ Произошла ошибка при сохранении отчета.")
 
 # --- Admin Reports ---
 @dp.message(F.text == "📊 Сводный отчет")
 async def generate_admin_report(message: types.Message):
     week_start, week_end = get_current_week_dates()
-    pool = message.bot.get("pool")
     
-    async with pool.acquire() as conn:
-        # Проверяем права администратора
-        is_admin = await conn.fetchval(
-            "SELECT is_admin FROM users WHERE user_id = $1",
-            message.from_user.id
-        )
-        if not is_admin:
-            return
+    try:
+        pool = message.bot.get("pool")
         
-        # Получаем сводный отчет
-        report = await conn.fetch(
-            "SELECT u.full_name, wp.work_type, SUM(uw.amount) as completed, wp.total_amount "
-            "FROM user_work uw "
-            "JOIN users u ON uw.user_id = u.user_id "
-            "JOIN work_plans wp ON uw.plan_id = wp.plan_id "
-            "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
-            "WHERE wt.week_start = $1 AND wt.week_end = $2 "
-            "GROUP BY u.full_name, wp.work_type, wp.total_amount "
-            "ORDER BY u.full_name, wp.work_type",
-            week_start, week_end
-        )
-        
-        if not report:
-            await message.answer("Нет данных за текущую неделю")
-            return
-        
-        # Формируем сообщение
-        current_user = None
-        message_text = f"📊 Сводный отчет за неделю {format_week_range(week_start)}\n\n"
-        
-        for row in report:
-            if row['full_name'] != current_user:
-                message_text += f"\n👤 <b>{row['full_name']}</b>\n"
-                current_user = row['full_name']
-            
-            percentage = (row['completed'] / row['total_amount']) * 100
-            message_text += (
-                f"  🔧 {row['work_type']}: {row['completed']}/{row['total_amount']} "
-                f"({percentage:.1f}%)\n"
+        async with pool.acquire() as conn:
+            # Проверяем права администратора
+            is_admin = await conn.fetchval(
+                "SELECT is_admin FROM users WHERE user_id = $1",
+                message.from_user.id
             )
-    
-    await message.answer(message_text, parse_mode="HTML")
+            if not is_admin:
+                return
+            
+            # Получаем сводный отчет
+            report = await conn.fetch(
+                "SELECT u.full_name, wp.work_type, SUM(uw.amount) as completed, wp.total_amount "
+                "FROM user_work uw "
+                "JOIN users u ON uw.user_id = u.user_id "
+                "JOIN work_plans wp ON uw.plan_id = wp.plan_id "
+                "JOIN weekly_tasks wt ON wp.task_id = wt.task_id "
+                "WHERE wt.week_start = $1 AND wt.week_end = $2 "
+                "GROUP BY u.full_name, wp.work_type, wp.total_amount "
+                "ORDER BY u.full_name, wp.work_type",
+                week_start, week_end
+            )
+            
+            if not report:
+                await message.answer("Нет данных за текущую неделю")
+                return
+            
+            # Формируем сообщение
+            current_user = None
+            message_text = f"📊 Сводный отчет за неделю {format_week_range(week_start)}\n\n"
+            
+            for row in report:
+                if row['full_name'] != current_user:
+                    message_text += f"\n👤 <b>{row['full_name']}</b>\n"
+                    current_user = row['full_name']
+                
+                percentage = (row['completed'] / row['total_amount']) * 100
+                message_text += (
+                    f"  🔧 {row['work_type']}: {row['completed']}/{row['total_amount']} "
+                    f"({percentage:.1f}%)\n"
+                )
+        
+        await message.answer(message_text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in generate_admin_report: {e}")
+        await message.answer("⚠️ Произошла ошибка при формировании отчета.")
 
 # --- User Management ---
 @dp.message(F.text == "👥 Управление пользователями")
 async def user_management(message: types.Message):
-    pool = message.bot.get("pool")
-    async with pool.acquire() as conn:
-        is_admin = await conn.fetchval(
-            "SELECT is_admin FROM users WHERE user_id = $1",
-            message.from_user.id
-        )
+    try:
+        pool = message.bot.get("pool")
+        async with pool.acquire() as conn:
+            is_admin = await conn.fetchval(
+                "SELECT is_admin FROM users WHERE user_id = $1",
+                message.from_user.id
+            )
+            
+            if not is_admin:
+                return
         
-        if not is_admin:
-            return
-    
-    await message.answer(
-        "👥 Управление пользователями",
-        reply_markup=get_user_management_kb()
-    )
+        await message.answer(
+            "👥 Управление пользователями",
+            reply_markup=get_user_management_kb()
+        )
+    except Exception as e:
+        logger.error(f"Error in user_management: {e}")
+        await message.answer("⚠️ Произошла ошибка при подключении к базе данных.")
 
 # --- Bot Setup ---
 async def on_startup(bot: Bot):
-    pool = await init_db()
-    bot["pool"] = pool
-    logger.info("Bot started")
+    try:
+        pool = await init_db()
+        bot["pool"] = pool
+        logger.info("Database pool created successfully")
+        
+        # Проверяем подключение
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+            
+        logger.info("Bot started successfully")
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+        raise
 
 async def on_shutdown(bot: Bot):
-    pool = bot.get("pool")
-    if pool:
-        await pool.close()
-    logger.info("Bot stopped")
+    try:
+        pool = bot.get("pool")
+        if pool:
+            await pool.close()
+            logger.info("Database pool closed successfully")
+    except Exception as e:
+        logger.error(f"Shutdown error: {e}")
+    finally:
+        logger.info("Bot stopped")
 
 # Запуск бота
 async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
-    await dp.start_polling(bot)
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     import asyncio
