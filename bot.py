@@ -39,6 +39,28 @@ WORK_TYPES = [
     "Фрезеровка пазов ручек", "Распил на ручки"
 ]
 
+def cancel(update: Update, context: CallbackContext) -> int:
+    """Отмена текущего действия и возврат в главное меню"""
+    try:
+        if update.message:
+            update.message.reply_text(
+                "Действие отменено",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            show_main_menu(update, context)
+        elif update.callback_query:
+            update.callback_query.answer()
+            update.callback_query.edit_message_text(
+                text="Действие отменено",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
+                )
+            )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error in cancel function: {e}")
+        return ConversationHandler.END
+    
 # Подключение к PostgreSQL
 def get_db_connection():
     db_url = os.getenv('DATABASE_URL')
@@ -676,6 +698,7 @@ def main() -> None:
     
     # Обработчики команд
     dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("cancel", cancel))
     
     # Обработчики callback-запросов
     dispatcher.add_handler(CallbackQueryHandler(show_main_menu, pattern='^main_menu$'))
@@ -743,3 +766,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
