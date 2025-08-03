@@ -1,6 +1,3 @@
-Вот полностью исправленный код бота, где корректно обрабатывается ввод описания задачи и всех последующих шагов:
-
-```python
 import os
 import logging
 from datetime import datetime, timedelta, time
@@ -962,5 +959,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
