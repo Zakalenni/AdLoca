@@ -1,3 +1,6 @@
+Вот полностью исправленный код бота, где корректно обрабатывается ввод описания задачи и всех последующих шагов:
+
+```python
 import os
 import logging
 from datetime import datetime, timedelta, time
@@ -327,12 +330,7 @@ def set_task(update: Update, context: CallbackContext) -> int:
 def set_task_description(update: Update, context: CallbackContext) -> int:
     try:
         description = update.message.text.strip()
-        
-        # Удаляем предыдущую клавиатуру
-        update.message.reply_text(
-            "Принято!",
-            reply_markup=ReplyKeyboardRemove()
-        )
+        logger.info(f"Received task description: {description}")
         
         if not description:
             update.message.reply_text(
@@ -342,6 +340,7 @@ def set_task_description(update: Update, context: CallbackContext) -> int:
             return SETTING_TASK_DESCRIPTION
         
         context.user_data['task_description'] = description
+        logger.info(f"Task description saved: {description}")
         
         update.message.reply_text(
             "Теперь введите общее количество для задачи (целое число):",
@@ -828,6 +827,15 @@ def error_handler(update: Update, context: CallbackContext):
         )
 
 def unknown_message(update: Update, context: CallbackContext):
+    # Проверяем, находится ли пользователь в процессе создания задачи
+    if 'task_description' in context.user_data:
+        return set_task_description(update, context)
+    elif 'total_amount' in context.user_data:
+        return set_task_amount(update, context)
+    elif 'current_work_type' in context.user_data:
+        return set_work_amount(update, context)
+    
+    # Если не в процессе, показываем стандартное сообщение
     update.message.reply_text(
         "Я не понимаю эту команду. Используйте кнопки меню.",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
@@ -862,6 +870,7 @@ def main() -> None:
     dispatcher.add_handler(CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'))
     dispatcher.add_handler(CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$'))
     dispatcher.add_handler(CallbackQueryHandler(confirm_task, pattern='^confirm_task$'))
+    
     
     # ConversationHandler для админских функций
     task_conv_handler = ConversationHandler(
@@ -953,4 +962,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
