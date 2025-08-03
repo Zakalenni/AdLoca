@@ -327,53 +327,62 @@ def set_task(update: Update, context: CallbackContext) -> int:
 
 # Обработка описания задачи
 def set_task_description(update: Update, context: CallbackContext) -> int:
-    text = update.message.text
-    parts = text.rsplit('-', 1)
-    
-    if len(parts) != 2:
-        update.message.reply_text(
-            "Неверный формат. Введите описание задачи и общее количество через тире (например: 'Изготовление столов - 100').",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK
-    
-    description = parts[0].strip()
     try:
-        total_amount = int(parts[1].strip())
-    except ValueError:
-        update.message.reply_text(
-            "Неверный формат количества. Введите целое число.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SETTING_TASK
-    
-    context.user_data['task_description'] = description
-    context.user_data['total_amount'] = total_amount
-    
-    # Создаем задачу в базе данных
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "INSERT INTO tasks (description, total_amount, created_by) VALUES (%s, %s, %s) RETURNING task_id",
-                (description, total_amount, update.message.from_user.id)
+        text = update.message.text
+        parts = text.rsplit('-', 1)
+        
+        if len(parts) != 2:
+            update.message.reply_text(
+                "❌ Неверный формат. Введите: 'Описание задачи - Общее количество'",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_panel')]])
             )
-            task_id = cursor.fetchone()[0]
-            conn.commit()
-    
-    context.user_data['task_id'] = task_id
-    
-    # Создаем кнопки для выбора дня недели
-    days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-    keyboard = [
-        [InlineKeyboardButton(day, callback_data=f'day_{i}')] for i, day in enumerate(days)
-    ]
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
-    
-    update.message.reply_text(
-        "Выберите день недели для распределения работ:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return SETTING_WORK_TYPE
+            return SETTING_TASK
+            
+        description = parts[0].strip()
+        try:
+            total_amount = int(parts[1].strip())
+        except ValueError:
+            update.message.reply_text(
+                "❌ Количество должно быть числом",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data='admin_panel')]])
+            )
+            return SETTING_TASK
+        
+        # Сохраняем данные в context.user_data
+        context.user_data['task_description'] = description
+        context.user_data['total_amount'] = total_amount
+        
+        # Создаем задачу в БД
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO tasks (description, total_amount, created_by) VALUES (%s, %s, %s) RETURNING task_id",
+                    (description, total_amount, update.message.from_user.id)
+                )
+                task_id = cursor.fetchone()[0]
+                conn.commit()
+        
+        context.user_data['task_id'] = task_id
+        logger.info(f"New task created: {task_id} - {description}")
+        
+        # Кнопки для выбора дня недели
+        days = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+        buttons = [[InlineKeyboardButton(day, callback_data=f'day_{i}')] for i, day in enumerate(days)]
+        buttons.append([InlineKeyboardButton("🔙 Отмена", callback_data='admin_panel')])
+        
+        update.message.reply_text(
+            "📅 Выберите день недели для распределения работ:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return SETTING_WORK_TYPE
+        
+    except Exception as e:
+        logger.error(f"Error in set_task_description: {e}")
+        update.message.reply_text(
+            "⚠️ Произошла ошибка при создании задачи",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
+        )
+        return ConversationHandler.END
 
 # Выбор вида работы для задачи
 def set_work_type(update: Update, context: CallbackContext) -> int:
@@ -695,6 +704,28 @@ def main() -> None:
     # Планировщик для удаления старых сообщений (раз в день)
     job_queue = updater.job_queue
     job_queue.run_daily(delete_old_messages, time=time(hour=3, minute=0))  # Исправленная строка
+
+    # Регистрация ConversationHandler для админских задач
+    admin_task_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
+        states={
+            SETTING_TASK: [MessageHandler(Filters.text & ~Filters.command, set_task_description)],
+            SETTING_WORK_TYPE: [
+                CallbackQueryHandler(set_work_type, pattern='^day_[0-6]$'),
+                CallbackQueryHandler(cancel, pattern='^cancel$')
+            ],
+            SETTING_AMOUNT: [
+                CallbackQueryHandler(set_work_amount, pattern='^work_[0-9]+$'),
+                MessageHandler(Filters.text & ~Filters.command, save_work_assignment)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(admin_panel, pattern='^admin_panel$'),
+            CommandHandler('cancel', cancel)
+        ],
+        allow_reentry=True
+    )
+    dispatcher.add_handler(admin_task_handler)
     
     # Запуск бота
     updater.start_polling()
@@ -702,6 +733,7 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
 
