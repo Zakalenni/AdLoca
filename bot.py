@@ -183,11 +183,20 @@ def show_main_menu(update: Update, context: CallbackContext) -> int:
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        update.callback_query.edit_message_text(
-            text="Главное меню. Выберите действие:",
-            reply_markup=reply_markup
-        )
-        update.callback_query.answer()
+        try:
+            update.callback_query.answer()
+            update.callback_query.edit_message_text(
+                text="Главное меню. Выберите действие:",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Error in show_main_menu: {e}")
+            if update.callback_query.message:
+                context.bot.send_message(
+                    chat_id=update.callback_query.message.chat_id,
+                    text="Главное меню. Выберите действие:",
+                    reply_markup=reply_markup
+                )
     else:
         update.message.reply_text(
             "Главное меню. Выберите действие:",
@@ -203,13 +212,24 @@ def cancel(update: Update, context: CallbackContext) -> int:
                 reply_markup=ReplyKeyboardRemove()
             )
         elif update.callback_query:
-            update.callback_query.answer()
-            update.callback_query.edit_message_text(
-                text="Действие отменено",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
+            try:
+                update.callback_query.answer()
+                update.callback_query.edit_message_text(
+                    text="Действие отменено",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
+                    )
                 )
-            )
+            except Exception as e:
+                logger.error(f"Error in cancel (callback): {e}")
+                if update.callback_query.message:
+                    context.bot.send_message(
+                        chat_id=update.callback_query.message.chat_id,
+                        text="Действие отменено",
+                        reply_markup=InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]]
+                        )
+                    )
         return show_main_menu(update, context)
     except Exception as e:
         logger.error(f"Error in cancel function: {e}")
@@ -217,10 +237,20 @@ def cancel(update: Update, context: CallbackContext) -> int:
 
 def admin_panel(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in admin_panel: {e}")
     
     if not is_admin(query.from_user.id):
-        query.edit_message_text(text="⛔ У вас нет прав администратора.")
+        try:
+            query.edit_message_text(text="⛔ У вас нет прав администратора.")
+        except Exception as e:
+            logger.error(f"Error editing message in admin_panel: {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="⛔ У вас нет прав администратора."
+            )
         return MAIN_MENU
     
     keyboard = [
@@ -230,124 +260,43 @@ def admin_panel(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]
     ]
     
-    query.edit_message_text(
-        text="Админ-панель. Выберите действие:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    try:
+        query.edit_message_text(
+            text="Админ-панель. Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error editing message in admin_panel: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Админ-панель. Выберите действие:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     return ADMIN_PANEL
-
-def manage_users(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    if not is_admin(query.from_user.id):
-        query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return ADMIN_PANEL
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='add_user')],
-        [InlineKeyboardButton("➖ Удалить пользователя", callback_data='remove_user')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
-    ]
-    
-    query.edit_message_text(
-        text="Управление пользователями:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return MANAGE_USERS
-
-def add_user(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    query.edit_message_text(
-        text="Введите ID пользователя, которого хотите добавить:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-    )
-    return ADD_USER
-
-def add_user_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        user_id = int(update.message.text.strip())
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO allowed_users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", 
-                    (user_id,)
-                )
-                conn.commit()
-        
-        update.message.reply_text(
-            f"✅ Пользователь {user_id} добавлен в список разрешенных.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return MANAGE_USERS
-    except ValueError:
-        update.message.reply_text(
-            "❌ Неверный формат ID. Введите числовой ID пользователя.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return ADD_USER
-    except Exception as e:
-        logger.error(f"Error adding user: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return ADD_USER
-
-def remove_user(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    query.edit_message_text(
-        text="Введите ID пользователя, которого хотите удалить:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-    )
-    return REMOVE_USER
-
-def remove_user_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        user_id = int(update.message.text.strip())
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "DELETE FROM allowed_users WHERE user_id = %s", 
-                    (user_id,)
-                )
-                conn.commit()
-        
-        update.message.reply_text(
-            f"✅ Пользователь {user_id} удален из списка разрешенных.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return MANAGE_USERS
-    except ValueError:
-        update.message.reply_text(
-            "❌ Неверный формат ID. Введите числовой ID пользователя.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return REMOVE_USER
-    except Exception as e:
-        logger.error(f"Error removing user: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return REMOVE_USER
 
 def set_task(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in set_task: {e}")
     
     context.user_data.clear()
     context.user_data['task_works'] = []
     context.user_data['task_description'] = f"Задача от {datetime.now().strftime('%d.%m.%Y')}"
     
-    query.edit_message_text(
-        text=f"Название задачи: {context.user_data['task_description']}\n\nВведите общее количество для задачи (целое число):",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-    )
+    try:
+        query.edit_message_text(
+            text=f"Название задачи: {context.user_data['task_description']}\n\nВведите общее количество для задачи (целое число):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
+    except Exception as e:
+        logger.error(f"Error editing message in set_task: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Название задачи: {context.user_data['task_description']}\n\nВведите общее количество для задачи (целое число):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
     return SET_TASK_AMOUNT
 
 def set_task_amount(update: Update, context: CallbackContext) -> int:
@@ -361,7 +310,11 @@ def set_task_amount(update: Update, context: CallbackContext) -> int:
             
             return add_work_type(update, context)
         else:
-            update.callback_query.answer()
+            if update.callback_query:
+                try:
+                    update.callback_query.answer()
+                except Exception as e:
+                    logger.error(f"Error answering callback in set_task_amount: {e}")
             return SET_TASK_AMOUNT
             
     except ValueError:
@@ -392,11 +345,20 @@ def add_work_type(update: Update, context: CallbackContext) -> int:
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')])
     
     if update.callback_query:
-        update.callback_query.edit_message_text(
-            text="Выберите вид работы для добавления:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        update.callback_query.answer()
+        try:
+            update.callback_query.answer()
+            update.callback_query.edit_message_text(
+                text="Выберите вид работы для добавления:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Error in add_work_type (callback): {e}")
+            if update.callback_query.message:
+                context.bot.send_message(
+                    chat_id=update.callback_query.message.chat_id,
+                    text="Выберите вид работы для добавления:",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
     else:
         update.message.reply_text(
             "Выберите вид работы для добавления:",
@@ -407,15 +369,26 @@ def add_work_type(update: Update, context: CallbackContext) -> int:
 
 def select_work_type(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in select_work_type: {e}")
     
     work_type_idx = int(query.data.split('_')[2])
     context.user_data['current_work_type'] = WORK_TYPES[work_type_idx]
     
-    query.edit_message_text(
-        text=f"Введите количество для работы '{WORK_TYPES[work_type_idx]}':",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
-    )
+    try:
+        query.edit_message_text(
+            text=f"Введите количество для работы '{WORK_TYPES[work_type_idx]}':",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
+        )
+    except Exception as e:
+        logger.error(f"Error editing message in select_work_type: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Введите количество для работы '{WORK_TYPES[work_type_idx]}':",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
+        )
     return SET_WORK_AMOUNT
 
 def set_work_amount(update: Update, context: CallbackContext) -> int:
@@ -438,7 +411,11 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
             
             return add_work_type(update, context)
         else:
-            update.callback_query.answer()
+            if update.callback_query:
+                try:
+                    update.callback_query.answer()
+                except Exception as e:
+                    logger.error(f"Error answering callback in set_work_amount: {e}")
             return SET_WORK_AMOUNT
             
     except ValueError:
@@ -457,13 +434,24 @@ def set_work_amount(update: Update, context: CallbackContext) -> int:
 
 def finish_adding_works(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in finish_adding_works: {e}")
     
     if not context.user_data.get('task_works'):
-        query.edit_message_text(
-            text="❌ Не добавлено ни одной работы. Добавьте хотя бы одну работу.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
-        )
+        try:
+            query.edit_message_text(
+                text="❌ Не добавлено ни одной работы. Добавьте хотя бы одну работу.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in finish_adding_works: {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="❌ Не добавлено ни одной работы. Добавьте хотя бы одну работу.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='add_work_type')]])
+            )
         return ADD_WORK_TYPE
     
     message = "📝 Подтвердите создание задачи:\n\n"
@@ -480,15 +468,26 @@ def finish_adding_works(update: Update, context: CallbackContext) -> int:
         [InlineKeyboardButton("❌ Отменить", callback_data='admin_panel')]
     ]
     
-    query.edit_message_text(
-        text=message,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    try:
+        query.edit_message_text(
+            text=message,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    except Exception as e:
+        logger.error(f"Error editing message in finish_adding_works: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=message,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
     return CONFIRM_TASK
 
 def confirm_task(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in confirm_task: {e}")
     
     try:
         with get_db_connection() as conn:
@@ -509,171 +508,75 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
                 
                 conn.commit()
         
-        query.edit_message_text(
-            text=f"✅ Задача '{context.user_data['task_description']}' успешно создана!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
-        )
+        try:
+            query.edit_message_text(
+                text=f"✅ Задача '{context.user_data['task_description']}' успешно создана!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in confirm_task: {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"✅ Задача '{context.user_data['task_description']}' успешно создана!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
+            )
         
         context.user_data.clear()
         return ADMIN_PANEL
     except Exception as e:
         logger.error(f"Error creating task: {e}")
-        query.edit_message_text(
-            text="❌ Ошибка при создании задачи. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
-        )
-        return ADMIN_PANEL
-
-def view_tasks(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT t.task_id, t.description, t.total_amount, 
-                           COALESCE(SUM(r.amount), 0) AS completed
-                    FROM tasks t
-                    LEFT JOIN reports r ON t.task_id = r.task_id
-                    WHERE t.is_active = TRUE
-                    GROUP BY t.task_id
-                    ORDER BY t.created_at DESC
-                """)
-                tasks = cursor.fetchall()
-                
-                tasks_with_works = []
-                for task in tasks:
-                    cursor.execute("""
-                        SELECT work_type, amount 
-                        FROM task_works 
-                        WHERE task_id = %s
-                        ORDER BY created_at
-                    """, (task[0],))
-                    works = cursor.fetchall()
-                    tasks_with_works.append((task, works))
-        
-        if not tasks_with_works:
+        try:
             query.edit_message_text(
-                text="ℹ️ Нет активных задач.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+                text="❌ Ошибка при создании задачи. Попробуйте еще раз.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
             )
-            return MAIN_MENU
-        
-        message = "📋 Список активных задач:\n\n"
-        for task, works in tasks_with_works:
-            progress = (task[3] / task[2]) * 100 if task[2] > 0 else 0
-            message += (
-                f"🔹 {task[1]}\n"
-                f"📌 Всего: {task[2]}\n"
-                f"✅ Выполнено: {task[3]}\n"
-                f"📊 Прогресс: {progress:.1f}%\n"
-                f"🔧 Работы:\n"
+        except Exception as e:
+            logger.error(f"Error editing message in confirm_task (error): {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="❌ Ошибка при создании задачи. Попробуйте еще раз.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админ-панель", callback_data='admin_panel')]])
             )
-            
-            for work in works:
-                message += f"  - {work[0]}: {work[1]}\n"
-            
-            message += "\n"
-        
-        query.edit_message_text(
-            text=message,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
-        )
-        return MAIN_MENU
-    except Exception as e:
-        logger.error(f"Error viewing tasks: {e}")
-        query.edit_message_text(
-            text="❌ Ошибка при получении списка задач.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
-        )
-        return MAIN_MENU
-
-def view_reports(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    if not is_admin(query.from_user.id):
-        query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return MAIN_MENU
-    
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT r.report_id, u.full_name, 
-                           COALESCE(t.description, 'Без задачи') as task_description,
-                           r.work_type, r.amount, r.report_date
-                    FROM reports r
-                    JOIN users u ON r.user_id = u.user_id
-                    LEFT JOIN tasks t ON r.task_id = t.task_id
-                    ORDER BY r.report_date DESC, r.reported_at DESC
-                    LIMIT 20
-                """)
-                reports = cursor.fetchall()
-        
-        if not reports:
-            query.edit_message_text(
-                text="ℹ️ Нет отчетов для отображения.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-            )
-            return ADMIN_PANEL
-        
-        message = "📊 Последние отчеты:\n\n"
-        for report in reports:
-            message += (
-                f"👤 {report[1]}\n"
-                f"📅 {report[5].strftime('%d.%m.%Y')}\n"
-                f"📌 Задача: {report[2]}\n"
-                f"🔧 Работа: {report[3]}\n"
-                f"🔢 Количество: {report[4]}\n\n"
-            )
-        
-        query.edit_message_text(
-            text=message,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return ADMIN_PANEL
-    except Exception as e:
-        logger.error(f"Error viewing reports: {e}")
-        query.edit_message_text(
-            text="❌ Ошибка при получении отчетов.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
         return ADMIN_PANEL
 
 def send_report(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in send_report: {e}")
+    
+    keyboard = []
+    for i in range(0, len(WORK_TYPES), 2):
+        row = []
+        if i < len(WORK_TYPES):
+            row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
+        if i+1 < len(WORK_TYPES):
+            row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='main_menu')])
     
     try:
-        keyboard = []
-        for i in range(0, len(WORK_TYPES), 2):
-            row = []
-            if i < len(WORK_TYPES):
-                row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
-            if i+1 < len(WORK_TYPES):
-                row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
-            keyboard.append(row)
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='main_menu')])
-        
         query.edit_message_text(
             text="Выберите вид работы:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return REPORT_WORK_TYPE
     except Exception as e:
-        logger.error(f"Error starting report: {e}")
-        query.edit_message_text(
-            text="❌ Ошибка при начале отчета.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+        logger.error(f"Error editing message in send_report: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="Выберите вид работы:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return MAIN_MENU
+    return REPORT_WORK_TYPE
 
 def report_work_type(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in report_work_type: {e}")
     
     work_type_idx = int(query.data.split('_')[2])
     work_type = WORK_TYPES[work_type_idx]
@@ -694,23 +597,42 @@ def report_work_type(update: Update, context: CallbackContext) -> int:
         keyboard.append([InlineKeyboardButton("📌 Без задачи", callback_data='report_without_task')])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='send_report')])
         
-        query.edit_message_text(
-            text=f"Выберите задачу для работы '{work_type}' или отправьте без задачи:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        try:
+            query.edit_message_text(
+                text=f"Выберите задачу для работы '{work_type}' или отправьте без задачи:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in report_work_type: {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Выберите задачу для работы '{work_type}' или отправьте без задачи:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
     else:
         context.user_data['report_task_id'] = None
-        query.edit_message_text(
-            text=f"Введите количество выполненной работы '{work_type}':",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
-        )
+        try:
+            query.edit_message_text(
+                text=f"Введите количество выполненной работы '{work_type}':",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
+            )
+        except Exception as e:
+            logger.error(f"Error editing message in report_work_type (no tasks): {e}")
+            context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"Введите количество выполненной работы '{work_type}':",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
+            )
         return REPORT_AMOUNT
     
     return REPORT_WORK_TYPE
 
 def select_task_for_report(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
-    query.answer()
+    try:
+        query.answer()
+    except Exception as e:
+        logger.error(f"Error answering query in select_task_for_report: {e}")
     
     if query.data == 'report_without_task':
         context.user_data['report_task_id'] = None
@@ -718,10 +640,18 @@ def select_task_for_report(update: Update, context: CallbackContext) -> int:
         task_id = int(query.data.split('_')[2])
         context.user_data['report_task_id'] = task_id
     
-    query.edit_message_text(
-        text=f"Введите количество выполненной работы '{context.user_data['report_work_type']}':",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
-    )
+    try:
+        query.edit_message_text(
+            text=f"Введите количество выполненной работы '{context.user_data['report_work_type']}':",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
+        )
+    except Exception as e:
+        logger.error(f"Error editing message in select_task_for_report: {e}")
+        context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=f"Введите количество выполненной работы '{context.user_data['report_work_type']}':",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='send_report')]])
+        )
     return REPORT_AMOUNT
 
 def save_report(update: Update, context: CallbackContext) -> int:
@@ -756,7 +686,11 @@ def save_report(update: Update, context: CallbackContext) -> int:
             )
             return MAIN_MENU
         else:
-            update.callback_query.answer()
+            if update.callback_query:
+                try:
+                    update.callback_query.answer()
+                except Exception as e:
+                    logger.error(f"Error answering callback in save_report: {e}")
             return REPORT_AMOUNT
             
     except ValueError:
@@ -793,27 +727,51 @@ def unknown_message(update: Update, context: CallbackContext) -> int:
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
         )
     elif update.callback_query:
-        update.callback_query.answer()
-        update.callback_query.edit_message_text(
-            text="Я не понимаю эту команду. Используйте кнопки меню.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
-        )
+        try:
+            update.callback_query.answer()
+            update.callback_query.edit_message_text(
+                text="Я не понимаю эту команду. Используйте кнопки меню.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+            )
+        except Exception as e:
+            logger.error(f"Error in unknown_message (callback): {e}")
+            if update.callback_query.message:
+                context.bot.send_message(
+                    chat_id=update.callback_query.message.chat_id,
+                    text="Я не понимаю эту команду. Используйте кнопки меню.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+                )
     return MAIN_MENU
 
 def error_handler(update: Update, context: CallbackContext):
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     
-    if update.callback_query:
-        update.callback_query.answer()
-        update.callback_query.edit_message_text(
-            text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
-        )
-    else:
-        update.message.reply_text(
-            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
-        )
+    try:
+        if update.callback_query:
+            try:
+                update.callback_query.answer()
+            except:
+                pass
+            try:
+                update.callback_query.edit_message_text(
+                    text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+                )
+            except:
+                if update.callback_query.message:
+                    context.bot.send_message(
+                        chat_id=update.callback_query.message.chat_id,
+                        text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+                    )
+        else:
+            update.message.reply_text(
+                "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+            )
+    except Exception as e:
+        logger.error(f"Error in error_handler: {e}")
+    
     return MAIN_MENU
 
 def main() -> None:
@@ -853,7 +811,6 @@ def main() -> None:
     # Обработчики callback-запросов
     dispatcher.add_handler(CallbackQueryHandler(show_main_menu, pattern='^main_menu$'))
     dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
-    dispatcher.add_handler(CallbackQueryHandler(manage_users, pattern='^manage_users$'))
     dispatcher.add_handler(CallbackQueryHandler(view_tasks, pattern='^view_tasks$'))
     dispatcher.add_handler(CallbackQueryHandler(view_reports, pattern='^view_reports$'))
     dispatcher.add_handler(CallbackQueryHandler(send_report, pattern='^send_report$'))
@@ -893,6 +850,7 @@ def main() -> None:
         per_message=False
     )
     dispatcher.add_handler(report_conv_handler)
+
     # ConversationHandler для управления пользователями
     user_management_conv_handler = ConversationHandler(
         entry_points=[
@@ -930,4 +888,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
