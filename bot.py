@@ -1,6 +1,7 @@
 import os
 import logging
-from datetime import datetime, timedelta, time
+import time
+from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
 import psycopg2
@@ -896,9 +897,9 @@ def main() -> None:
     # Определение состояний ConversationHandler
     (
         SETTING_TASK_DESCRIPTION, SETTING_TASK_AMOUNT,
-        ADDING_WORK_TYPES, SETTING_WORK_AMOUNT, CONFIRM_TASK,
-        REPORTING_WORK_TYPE, REPORTING_AMOUNT,
-        ADMIN_ADD_USER, ADMIN_REMOVE_USER
+        ADD_WORK_TYPE, SET_WORK_AMOUNT, CONFIRM_TASK,
+        REPORT_WORK_TYPE, REPORT_AMOUNT,
+        ADD_USER, REMOVE_USER
     ) = range(9)
 
     # Обработчики команд
@@ -921,21 +922,21 @@ def main() -> None:
     task_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
-            SETTING_TASK_DESCRIPTION: [
+            SET_TASK_DESCRIPTION: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    lambda update, context: set_task_description(update, context, SETTING_TASK_AMOUNT)
+                    set_task_description
                 )
             ],
-            SETTING_TASK_AMOUNT: [
+            SET_TASK_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    lambda update, context: set_task_amount(update, context, ADDING_WORK_TYPES)
+                    set_task_amount
                 )
             ],
-            ADDING_WORK_TYPES: [
+            ADD_WORK_TYPE: [
                 CallbackQueryHandler(
-                    lambda update, context: select_work_type(update, context, SETTING_WORK_AMOUNT),
+                    select_work_type,
                     pattern='^add_work_[0-9]+$'
                 ),
                 CallbackQueryHandler(
@@ -943,10 +944,10 @@ def main() -> None:
                     pattern='^finish_adding_works$'
                 )
             ],
-            SETTING_WORK_AMOUNT: [
+            SET_WORK_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
-                    lambda update, context: set_work_amount(update, context, ADDING_WORK_TYPES)
+                    set_work_amount
                 )
             ],
             CONFIRM_TASK: [
@@ -968,13 +969,13 @@ def main() -> None:
     report_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(send_report, pattern='^send_report$')],
         states={
-            REPORTING_WORK_TYPE: [
+            REPORT_WORK_TYPE: [
                 CallbackQueryHandler(
                     report_work_type,
                     pattern='^report_work_[0-9]+$'
                 )
             ],
-            REPORTING_AMOUNT: [
+            REPORT_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
                     save_report
@@ -996,13 +997,13 @@ def main() -> None:
             CallbackQueryHandler(remove_user, pattern='^remove_user$')
         ],
         states={
-            ADMIN_ADD_USER: [
+            ADD_USER: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
                     add_user_handler
                 )
             ],
-            ADMIN_REMOVE_USER: [
+            REMOVE_USER: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
                     remove_user_handler
@@ -1028,7 +1029,7 @@ def main() -> None:
 
     # Планировщик для удаления старых сообщений
     job_queue = updater.job_queue
-    job_queue.run_daily(delete_old_messages, time=time(hour=3, minute=0))
+    job_queue.run_daily(delete_old_messages, time=datetime.strptime("03:00", "%H:%M").time())
 
     # Запуск бота
     try:
