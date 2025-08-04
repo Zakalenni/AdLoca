@@ -514,6 +514,28 @@ def is_user_allowed(user_id: int) -> bool:
         logger.error(f"Error checking allowed user: {e}")
         return False
 
+
+def manage_users(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    if not is_admin(query.from_user.id):
+        query.edit_message_text(text="⛔ У вас нет прав администратора.")
+        return MAIN_MENU
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='add_user')],
+        [InlineKeyboardButton("➖ Удалить пользователя", callback_data='remove_user')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
+    ]
+    
+    query.edit_message_text(
+        text="Управление пользователями:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return MANAGE_USERS
+
+
 def main() -> None:
     try:
         init_db()
@@ -611,3 +633,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
