@@ -1,4 +1,3 @@
-import os
 import logging
 import time
 from datetime import datetime, timedelta
@@ -236,6 +235,106 @@ def admin_panel(update: Update, context: CallbackContext) -> int:
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return ADMIN_PANEL
+
+def manage_users(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    if not is_admin(query.from_user.id):
+        query.edit_message_text(text="⛔ У вас нет прав администратора.")
+        return ADMIN_PANEL
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='add_user')],
+        [InlineKeyboardButton("➖ Удалить пользователя", callback_data='remove_user')],
+        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
+    ]
+    
+    query.edit_message_text(
+        text="Управление пользователями:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return MANAGE_USERS
+
+def add_user(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    query.edit_message_text(
+        text="Введите ID пользователя, которого хотите добавить:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+    )
+    return ADD_USER
+
+def add_user_handler(update: Update, context: CallbackContext) -> int:
+    try:
+        user_id = int(update.message.text.strip())
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO allowed_users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", 
+                    (user_id,)
+                )
+                conn.commit()
+        
+        update.message.reply_text(
+            f"✅ Пользователь {user_id} добавлен в список разрешенных.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return MANAGE_USERS
+    except ValueError:
+        update.message.reply_text(
+            "❌ Неверный формат ID. Введите числовой ID пользователя.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return ADD_USER
+    except Exception as e:
+        logger.error(f"Error adding user: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return ADD_USER
+
+def remove_user(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    query.edit_message_text(
+        text="Введите ID пользователя, которого хотите удалить:",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+    )
+    return REMOVE_USER
+
+def remove_user_handler(update: Update, context: CallbackContext) -> int:
+    try:
+        user_id = int(update.message.text.strip())
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "DELETE FROM allowed_users WHERE user_id = %s", 
+                    (user_id,)
+                )
+                conn.commit()
+        
+        update.message.reply_text(
+            f"✅ Пользователь {user_id} удален из списка разрешенных.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return MANAGE_USERS
+    except ValueError:
+        update.message.reply_text(
+            "❌ Неверный формат ID. Введите числовой ID пользователя.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return REMOVE_USER
+    except Exception as e:
+        logger.error(f"Error removing user: {e}")
+        update.message.reply_text(
+            "❌ Произошла ошибка. Попробуйте еще раз.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+        )
+        return REMOVE_USER
 
 def set_task(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -687,109 +786,35 @@ def is_user_allowed(user_id: int) -> bool:
         logger.error(f"Error checking allowed user: {e}")
         return False
 
+def unknown_message(update: Update, context: CallbackContext) -> int:
+    if update.message:
+        update.message.reply_text(
+            "Я не понимаю эту команду. Используйте кнопки меню.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+        )
+    elif update.callback_query:
+        update.callback_query.answer()
+        update.callback_query.edit_message_text(
+            text="Я не понимаю эту команду. Используйте кнопки меню.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
+        )
+    return MAIN_MENU
 
-
-def manage_users(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
+def error_handler(update: Update, context: CallbackContext):
+    logger.error(msg="Exception while handling an update:", exc_info=context.error)
     
-    if not is_admin(query.from_user.id):
-        query.edit_message_text(text="⛔ У вас нет прав администратора.")
-        return ADMIN_PANEL
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ Добавить пользователя", callback_data='add_user')],
-        [InlineKeyboardButton("➖ Удалить пользователя", callback_data='remove_user')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]
-    ]
-    
-    query.edit_message_text(
-        text="Управление пользователями:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return MANAGE_USERS
-
-def add_user(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    query.edit_message_text(
-        text="Введите ID пользователя, которого хотите добавить:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-    )
-    return ADD_USER
-
-def add_user_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        user_id = int(update.message.text.strip())
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "INSERT INTO allowed_users (user_id) VALUES (%s) ON CONFLICT DO NOTHING", 
-                    (user_id,)
-                )
-                conn.commit()
-        
-        update.message.reply_text(
-            f"✅ Пользователь {user_id} добавлен в список разрешенных.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+    if update.callback_query:
+        update.callback_query.answer()
+        update.callback_query.edit_message_text(
+            text="⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
         )
-        return MANAGE_USERS
-    except ValueError:
+    else:
         update.message.reply_text(
-            "❌ Неверный формат ID. Введите числовой ID пользователя.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
+            "⚠️ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data='main_menu')]])
         )
-        return ADD_USER
-    except Exception as e:
-        logger.error(f"Error adding user: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return ADD_USER
-
-def remove_user(update: Update, context: CallbackContext) -> int:
-    query = update.callback_query
-    query.answer()
-    
-    query.edit_message_text(
-        text="Введите ID пользователя, которого хотите удалить:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-    )
-    return REMOVE_USER
-
-def remove_user_handler(update: Update, context: CallbackContext) -> int:
-    try:
-        user_id = int(update.message.text.strip())
-        with get_db_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "DELETE FROM allowed_users WHERE user_id = %s", 
-                    (user_id,)
-                )
-                conn.commit()
-        
-        update.message.reply_text(
-            f"✅ Пользователь {user_id} удален из списка разрешенных.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return MANAGE_USERS
-    except ValueError:
-        update.message.reply_text(
-            "❌ Неверный формат ID. Введите числовой ID пользователя.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return REMOVE_USER
-    except Exception as e:
-        logger.error(f"Error removing user: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='manage_users')]])
-        )
-        return REMOVE_USER
-
-
+    return MAIN_MENU
 
 def main() -> None:
     try:
@@ -833,9 +858,6 @@ def main() -> None:
     dispatcher.add_handler(CallbackQueryHandler(view_reports, pattern='^view_reports$'))
     dispatcher.add_handler(CallbackQueryHandler(send_report, pattern='^send_report$'))
     dispatcher.add_handler(CallbackQueryHandler(set_task, pattern='^set_task$'))
-    dispatcher.add_handler(CallbackQueryHandler(add_user, pattern='^add_user$'))
-    dispatcher.add_handler(CallbackQueryHandler(remove_user, pattern='^remove_user$'))
-    dispatcher.add_handler(CallbackQueryHandler(select_task_for_report, pattern='^report_task_|^report_without_task$'))
 
     # ConversationHandler для создания задач
     task_conv_handler = ConversationHandler(
@@ -906,4 +928,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
