@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 (
     MAIN_MENU,
     ADMIN_PANEL,
-    SET_TASK_DESCRIPTION,
     SET_TASK_AMOUNT,
     ADD_WORK_TYPE,
     SET_WORK_AMOUNT,
@@ -39,7 +38,7 @@ logger = logging.getLogger(__name__)
     MANAGE_USERS,
     ADD_USER,
     REMOVE_USER
-) = range(12)
+) = range(11)
 
 # Виды работ
 WORK_TYPES = [
@@ -358,42 +357,17 @@ def set_task(update: Update, context: CallbackContext) -> int:
     context.user_data.clear()
     context.user_data['task_works'] = []
     
-    logger.info("Starting task creation process")
+    # Автоматически генерируем название задачи на основе текущей даты
+    current_date = datetime.now().strftime("%d.%m.%Y")
+    context.user_data['task_description'] = f"Задача от {current_date}"
+    
+    logger.info(f"Auto-generated task description: {context.user_data['task_description']}")
     
     query.edit_message_text(
-        text="Введите название задачи:",
+        text=f"Название задачи: {context.user_data['task_description']}\n\nВведите общее количество для задачи (целое число):",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
     )
-    return SET_TASK_DESCRIPTION
-
-def set_task_description(update: Update, context: CallbackContext) -> int:
-    try:
-        description = update.message.text.strip()
-        logger.info(f"Received task description: {description}")
-        
-        if not description:
-            update.message.reply_text(
-                "❌ Название не может быть пустым. Введите название задачи:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-            )
-            return SET_TASK_DESCRIPTION
-        
-        context.user_data['task_description'] = description
-        logger.info(f"Task description saved: {description}")
-        
-        update.message.reply_text(
-            "Введите общее количество для задачи (целое число):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SET_TASK_AMOUNT
-        
-    except Exception as e:
-        logger.error(f"Error in set_task_description: {e}")
-        update.message.reply_text(
-            "❌ Произошла ошибка. Попробуйте еще раз.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
-        )
-        return SET_TASK_DESCRIPTION
+    return SET_TASK_AMOUNT
 
 def set_task_amount(update: Update, context: CallbackContext) -> int:
     try:
@@ -896,11 +870,18 @@ def main() -> None:
 
     # Определение состояний ConversationHandler
     (
-        SETTING_TASK_DESCRIPTION, SETTING_TASK_AMOUNT,
-        ADD_WORK_TYPE, SET_WORK_AMOUNT, CONFIRM_TASK,
-        REPORT_WORK_TYPE, REPORT_AMOUNT,
-        ADD_USER, REMOVE_USER
-    ) = range(9)
+        MAIN_MENU,
+        ADMIN_PANEL,
+        SET_TASK_AMOUNT,
+        ADD_WORK_TYPE,
+        SET_WORK_AMOUNT,
+        CONFIRM_TASK,
+        REPORT_WORK_TYPE,
+        REPORT_AMOUNT,
+        MANAGE_USERS,
+        ADD_USER,
+        REMOVE_USER
+    ) = range(11)
 
     # Обработчики команд
     dispatcher.add_handler(CommandHandler("start", start))
@@ -922,12 +903,6 @@ def main() -> None:
     task_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
-            SET_TASK_DESCRIPTION: [
-                MessageHandler(
-                    Filters.text & ~Filters.command,
-                    set_task_description
-                )
-            ],
             SET_TASK_AMOUNT: [
                 MessageHandler(
                     Filters.text & ~Filters.command,
