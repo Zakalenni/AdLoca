@@ -2,7 +2,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
-
+import os
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import DictCursor
@@ -928,5 +928,6 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
 
 
