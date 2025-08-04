@@ -537,12 +537,14 @@ def manage_users(update: Update, context: CallbackContext) -> int:
 
 
 def main() -> None:
+    # Инициализация базы данных
     try:
         init_db()
     except Exception as e:
         logger.error(f"Ошибка при инициализации БД: {e}")
         return
 
+    # Создание Updater
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
         logger.error("Не задан TELEGRAM_TOKEN")
@@ -553,24 +555,17 @@ def main() -> None:
 
     # Определение состояний ConversationHandler
     (
-        MAIN_MENU,
-        ADMIN_PANEL,
-        SET_TASK_AMOUNT,
-        ADD_WORK_TYPE,
-        SET_WORK_AMOUNT,
-        CONFIRM_TASK,
-        REPORT_WORK_TYPE,
-        REPORT_AMOUNT,
-        MANAGE_USERS,
-        ADD_USER,
-        REMOVE_USER
-    ) = range(11)
+        SETTING_TASK_DESCRIPTION, SETTING_TASK_AMOUNT,
+        ADDING_WORK_TYPES, SETTING_WORK_AMOUNT, CONFIRM_TASK,
+        REPORTING_WORK_TYPE, REPORTING_AMOUNT,
+        ADMIN_ADD_USER, ADMIN_REMOVE_USER
+    ) = range(9)
 
-    # Основные обработчики
+    # Обработчики команд
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("cancel", cancel))
 
-    # Обработчики callback-запросов
+    # Основные обработчики callback-запросов
     dispatcher.add_handler(CallbackQueryHandler(show_main_menu, pattern='^main_menu$'))
     dispatcher.add_handler(CallbackQueryHandler(admin_panel, pattern='^admin_panel$'))
     dispatcher.add_handler(CallbackQueryHandler(manage_users, pattern='^manage_users$'))
@@ -586,19 +581,46 @@ def main() -> None:
     task_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(set_task, pattern='^set_task$')],
         states={
-            SET_TASK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, set_task_amount)],
-            ADD_WORK_TYPE: [
-                CallbackQueryHandler(select_work_type, pattern='^add_work_[0-9]+$'),
-                CallbackQueryHandler(finish_adding_works, pattern='^finish_adding_works$')
+            SETTING_TASK_DESCRIPTION: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    lambda update, context: set_task_description(update, context, SETTING_TASK_AMOUNT)
+                )
             ],
-            SET_WORK_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, set_work_amount)],
-            CONFIRM_TASK: [CallbackQueryHandler(confirm_task, pattern='^confirm_task$')]
+            SETTING_TASK_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    lambda update, context: set_task_amount(update, context, ADDING_WORK_TYPES)
+                )
+            ],
+            ADDING_WORK_TYPES: [
+                CallbackQueryHandler(
+                    lambda update, context: select_work_type(update, context, SETTING_WORK_AMOUNT),
+                    pattern='^add_work_[0-9]+$'
+                ),
+                CallbackQueryHandler(
+                    finish_adding_works,
+                    pattern='^finish_adding_works$'
+                )
+            ],
+            SETTING_WORK_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    lambda update, context: set_work_amount(update, context, ADDING_WORK_TYPES)
+                )
+            ],
+            CONFIRM_TASK: [
+                CallbackQueryHandler(
+                    confirm_task,
+                    pattern='^confirm_task$'
+                )
+            ]
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(admin_panel, pattern='^admin_panel$')
         ],
-        per_message=False
+        per_message=True
     )
     dispatcher.add_handler(task_conv_handler)
 
@@ -606,22 +628,67 @@ def main() -> None:
     report_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(send_report, pattern='^send_report$')],
         states={
-            REPORT_WORK_TYPE: [CallbackQueryHandler(report_work_type, pattern='^report_work_[0-9]+$')],
-            REPORT_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, save_report)]
+            REPORTING_WORK_TYPE: [
+                CallbackQueryHandler(
+                    report_work_type,
+                    pattern='^report_work_[0-9]+$'
+                )
+            ],
+            REPORTING_AMOUNT: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    save_report
+                )
+            ]
         },
         fallbacks=[
             CommandHandler('cancel', cancel),
             CallbackQueryHandler(show_main_menu, pattern='^main_menu$')
         ],
-        per_message=False
+        per_message=True
     )
     dispatcher.add_handler(report_conv_handler)
+
+    # ConversationHandler для управления пользователями
+    user_management_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(add_user, pattern='^add_user$'),
+            CallbackQueryHandler(remove_user, pattern='^remove_user$')
+        ],
+        states={
+            ADMIN_ADD_USER: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    add_user_handler
+                )
+            ],
+            ADMIN_REMOVE_USER: [
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    remove_user_handler
+                )
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            CallbackQueryHandler(manage_users, pattern='^manage_users$')
+        ],
+        per_message=True
+    )
+    dispatcher.add_handler(user_management_conv_handler)
 
     # Обработчик неизвестных сообщений
     dispatcher.add_handler(MessageHandler(
         Filters.text & ~Filters.command,
         unknown_message
     ))
+
+    # Обработчик ошибок
+    dispatcher.add_error_handler(error_handler)
+
+    # Планировщик для удаления старых сообщений
+    job_queue = updater.job_queue
+    job_queue.run_daily(delete_old_messages, time=time(hour=3, minute=0))
 
     # Запуск бота
     try:
@@ -633,4 +700,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
