@@ -78,8 +78,55 @@ def init_db():
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                # (остальные CREATE TABLE остаются без изменений)
-                pass
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        full_name TEXT,
+                        is_admin BOOLEAN DEFAULT FALSE,
+                        registered_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id SERIAL PRIMARY KEY,
+                        description TEXT NOT NULL,
+                        total_amount INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        created_by BIGINT REFERENCES users(user_id),
+                        is_active BOOLEAN DEFAULT TRUE
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS task_works (
+                        work_id SERIAL PRIMARY KEY,
+                        task_id INTEGER REFERENCES tasks(task_id),
+                        work_type TEXT NOT NULL,
+                        amount INTEGER NOT NULL,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS reports (
+                        report_id SERIAL PRIMARY KEY,
+                        user_id BIGINT REFERENCES users(user_id),
+                        task_id INTEGER,
+                        work_type TEXT NOT NULL,
+                        amount INTEGER NOT NULL,
+                        report_date DATE NOT NULL,
+                        reported_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS allowed_users (
+                        user_id BIGINT PRIMARY KEY
+                    )
+                """)
+                conn.commit()
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
@@ -378,26 +425,152 @@ def confirm_task(update: Update, context: CallbackContext) -> int:
         )
         return ADMIN_PANEL
 
+def view_tasks(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT t.task_id, t.description, t.total_amount, 
+                           COALESCE(SUM(r.amount), 0) AS completed
+                    FROM tasks t
+                    LEFT JOIN reports r ON t.task_id = r.task_id
+                    WHERE t.is_active = TRUE
+                    GROUP BY t.task_id
+                    ORDER BY t.created_at DESC
+                """)
+                tasks = cursor.fetchall()
+                
+                tasks_with_works = []
+                for task in tasks:
+                    cursor.execute("""
+                        SELECT work_type, amount 
+                        FROM task_works 
+                        WHERE task_id = %s
+                        ORDER BY created_at
+                    """, (task[0],))
+                    works = cursor.fetchall()
+                    tasks_with_works.append((task, works))
+        
+        if not tasks_with_works:
+            query.edit_message_text(
+                text="ℹ️ Нет активных задач.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+            )
+            return MAIN_MENU
+        
+        message = "📋 Список активных задач:\n\n"
+        for task, works in tasks_with_works:
+            progress = (task[3] / task[2]) * 100 if task[2] > 0 else 0
+            message += (
+                f"🔹 {task[1]}\n"
+                f"📌 Всего: {task[2]}\n"
+                f"✅ Выполнено: {task[3]}\n"
+                f"📊 Прогресс: {progress:.1f}%\n"
+                f"🔧 Работы:\n"
+            )
+            
+            for work in works:
+                message += f"  - {work[0]}: {work[1]}\n"
+            
+            message += "\n"
+        
+        query.edit_message_text(
+            text=message,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+        )
+        return MAIN_MENU
+    except Exception as e:
+        logger.error(f"Error viewing tasks: {e}")
+        query.edit_message_text(
+            text="❌ Ошибка при получении списка задач.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+        )
+        return MAIN_MENU
+
+def view_reports(update: Update, context: CallbackContext) -> int:
+    query = update.callback_query
+    query.answer()
+    
+    if not is_admin(query.from_user.id):
+        query.edit_message_text(text="⛔ У вас нет прав администратора.")
+        return MAIN_MENU
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    SELECT r.report_id, u.full_name, 
+                           COALESCE(t.description, 'Без задачи') as task_description,
+                           r.work_type, r.amount, r.report_date
+                    FROM reports r
+                    JOIN users u ON r.user_id = u.user_id
+                    LEFT JOIN tasks t ON r.task_id = t.task_id
+                    ORDER BY r.report_date DESC, r.reported_at DESC
+                    LIMIT 20
+                """)
+                reports = cursor.fetchall()
+        
+        if not reports:
+            query.edit_message_text(
+                text="ℹ️ Нет отчетов для отображения.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+            )
+            return ADMIN_PANEL
+        
+        message = "📊 Последние отчеты:\n\n"
+        for report in reports:
+            message += (
+                f"👤 {report[1]}\n"
+                f"📅 {report[5].strftime('%d.%m.%Y')}\n"
+                f"📌 Задача: {report[2]}\n"
+                f"🔧 Работа: {report[3]}\n"
+                f"🔢 Количество: {report[4]}\n\n"
+            )
+        
+        query.edit_message_text(
+            text=message,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
+        return ADMIN_PANEL
+    except Exception as e:
+        logger.error(f"Error viewing reports: {e}")
+        query.edit_message_text(
+            text="❌ Ошибка при получении отчетов.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='admin_panel')]])
+        )
+        return ADMIN_PANEL
+
 def send_report(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
     
-    keyboard = []
-    for i in range(0, len(WORK_TYPES), 2):
-        row = []
-        if i < len(WORK_TYPES):
-            row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
-        if i+1 < len(WORK_TYPES):
-            row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
-        keyboard.append(row)
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='main_menu')])
-    
-    query.edit_message_text(
-        text="Выберите вид работы:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return REPORT_WORK_TYPE
+    try:
+        keyboard = []
+        for i in range(0, len(WORK_TYPES), 2):
+            row = []
+            if i < len(WORK_TYPES):
+                row.append(InlineKeyboardButton(WORK_TYPES[i], callback_data=f'report_work_{i}'))
+            if i+1 < len(WORK_TYPES):
+                row.append(InlineKeyboardButton(WORK_TYPES[i+1], callback_data=f'report_work_{i+1}'))
+            keyboard.append(row)
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data='main_menu')])
+        
+        query.edit_message_text(
+            text="Выберите вид работы:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return REPORT_WORK_TYPE
+    except Exception as e:
+        logger.error(f"Error starting report: {e}")
+        query.edit_message_text(
+            text="❌ Ошибка при начале отчета.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data='main_menu')]])
+        )
+        return MAIN_MENU
 
 def report_work_type(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
@@ -515,6 +688,7 @@ def is_user_allowed(user_id: int) -> bool:
         return False
 
 
+
 def manage_users(update: Update, context: CallbackContext) -> int:
     query = update.callback_query
     query.answer()
@@ -534,6 +708,7 @@ def manage_users(update: Update, context: CallbackContext) -> int:
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return MANAGE_USERS
+
 
 
 def main() -> None:
